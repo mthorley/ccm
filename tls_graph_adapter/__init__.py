@@ -1,0 +1,1 @@
+"""OTLP-to-Neo4j graph adapter."""

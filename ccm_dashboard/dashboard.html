@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Continuous Controls Evaluation and Monitoring</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+  <main x-data="dashboard()" x-init="load().then(() => loadCsf())">
+    <header>
+      <div>
+        <h1>Continuous Controls Evaluation and Monitoring</h1>
+        <div class="subtitle">Neo4j-backed results across SSLyze, Wiz, and future scanners</div>
+      </div>
+      <div class="controls">
+        <select x-model="scanner" @change="load">
+          <option value="">All scanners</option>
+          <template x-for="name in scanners" :key="name">
+            <option :value="name" x-text="name"></option>
+          </template>
+        </select>
+        <select x-model="outcome" @change="load">
+          <option value="">All outcomes</option>
+          <option value="pass">pass</option>
+          <option value="warn">warn</option>
+          <option value="fail">fail</option>
+        </select>
+        <button @click="load" :disabled="loading" x-text="loading ? 'Loading...' : 'Refresh'"></button>
+      </div>
+    </header>
+
+    <section class="summary">
+      <div class="card">
+        <div class="label">Endpoints</div>
+        <div class="value" x-text="results.length"></div>
+      </div>
+      <div class="card">
+        <div class="label">Pass</div>
+        <div class="value" x-text="count('pass')"></div>
+      </div>
+      <div class="card">
+        <div class="label">Warn</div>
+        <div class="value" x-text="count('warn')"></div>
+      </div>
+      <div class="card">
+        <div class="label">Fail</div>
+        <div class="value" x-text="count('fail')"></div>
+      </div>
+      <div class="card" :title="lastScan ? 'Scan ' + lastScan.scan_id : ''">
+        <div class="label">Last scan</div>
+        <div class="value" x-text="lastScan ? duration(lastScan.duration_seconds) : '—'"></div>
+        <div class="subtitle" x-text="lastScan ? 'Started ' + datetime(lastScan.started_at) + ' · ' + lastScan.endpoints + ' endpoints' : 'No scans yet'"></div>
+      </div>
+    </section>
+
+    <div class="error" x-show="error" x-text="error"></div>
+
+    <section class="csf" aria-labelledby="csf-title">
+      <div class="csf-head">
+        <div>
+          <h2 id="csf-title" x-text="fw === 'csf' ? 'NIST CSF ' + (csf ? csf.version : '2.0') + ' coverage' : 'NIST SP 800-53 r' + (sp ? sp.version : '5') + ' coverage'"></h2>
+          <div class="subtitle" x-text="fw === 'csf'
+            ? 'Functions → categories → subcategories; the outer ring is evidence from TLS policies mapped through SP 800-53'
+            : 'Families → controls (enhancements roll up into their control); highlighted controls have TLS policy evidence'"></div>
+        </div>
+        <div class="controls">
+          <div class="segmented" role="group" aria-label="Framework">
+            <button type="button" :class="{ active: fw === 'csf' }" :aria-pressed="fw === 'csf'" @click="switchFw('csf')">CSF 2.0</button>
+            <button type="button" :class="{ active: fw === 'sp800-53' }" :aria-pressed="fw === 'sp800-53'" @click="switchFw('sp800-53')">SP 800-53</button>
+          </div>
+          <button type="button" x-show="fw === 'csf' && csfView === 'chart'" :class="{ active: csfZoomable }" :aria-pressed="csfZoomable" @click="toggleCsfZoom()" x-text="csfZoomable ? 'Zoomable ✓' : 'Zoomable'"></button>
+          <button type="button" @click="csfView = csfView === 'chart' ? 'table' : 'chart'" x-text="csfView === 'chart' ? 'Table view' : 'Chart view'"></button>
+        </div>
+      </div>
+
+      <div class="csf-summary" x-show="current()">
+        <template x-for="row in summaryChips()" :key="row.status">
+          <span class="status" :class="'status-' + row.status"><span class="status-icon" x-text="row.icon"></span><span x-text="row.count + ' ' + row.label"></span></span>
+        </template>
+      </div>
+
+      <div class="csf-body" x-show="csfView === 'chart'">
+        <div class="sunburst-wrap">
+          <div class="sunburst" x-show="fw === 'csf' && !csfZoomable" @mouseover="csfHover($event)" @mouseleave="csfLeave()" @click="csfClick($event)" @keydown.enter="csfClick($event)" x-html="svg()"></div>
+          <div class="sunburst" x-show="fw === 'csf' && csfZoomable" x-ref="csfZoomable"></div>
+          <div class="sunburst" x-show="fw === 'sp800-53'" x-ref="zoomable"><div class="csf-detail-empty" x-show="!sp" style="padding:40px;text-align:center">Loading SP 800-53 catalog…</div></div>
+          <div class="csf-crumbs" x-show="fw === 'sp800-53' || csfZoomable">
+            <button type="button" class="link" @click="zoomOut()" x-show="zoomed()" x-text="fw === 'csf' ? '← all functions' : '← all families'"></button>
+            <span class="muted" x-show="!zoomed()" x-text="fw === 'csf' ? 'Click a function or category to zoom in; click the centre to go back up.' : 'Click a family to zoom in; click a control to see its enhancements; click the centre to go back up.'"></span>
+          </div>
+          <div class="csf-legend" x-show="fw === 'csf' && csf">
+            <template x-for="fn in (csf ? csf.functions : [])" :key="fn.id">
+              <span class="legend-item"><i class="swatch" :style="'background:' + csfColor(fn.id)"></i><span x-text="fn.id + ' ' + titleCase(fn.title)"></span></span>
+            </template>
+          </div>
+          <div class="csf-legend" x-show="fw === 'sp800-53'">
+            <span class="legend-item"><i class="swatch" style="background: var(--accent)"></i><span>Control with TLS policy evidence</span></span>
+            <span class="legend-item"><i class="swatch" style="background: var(--ring-neutral-a-dim)"></i><span>No TLS policy mapped</span></span>
+          </div>
+        </div>
+
+        <aside class="csf-detail" aria-live="polite">
+          <template x-if="!csfSelected">
+            <div class="csf-detail-empty">Hover a segment for its text, references, and evidence. Click to pin.</div>
+          </template>
+          <template x-if="csfSelected">
+            <div>
+              <div class="csf-detail-path"><span x-text="csfSelected.path"></span><button type="button" class="link" x-show="csfPinned" @click="csfPinned = false; csfSelected = null">unpin</button></div>
+              <h3 x-text="csfSelected.id + (csfSelected.title ? ' · ' + csfSelected.title : '')"></h3>
+              <p class="csf-statement" x-text="csfSelected.text"></p>
+
+              <template x-if="csfSelected.kind === 'subcategory' || csfSelected.kind === 'control'">
+                <div>
+                  <div class="status" :class="'status-' + csfSelected.status"><span class="status-icon" x-text="statusIcon(csfSelected.status)"></span><span x-text="statusLabel(csfSelected.status)"></span></div>
+
+                  <template x-if="csfSelected.kind === 'subcategory'">
+                    <div>
+                      <div class="label" style="margin-top:14px">SP 800-53 informative references</div>
+                      <div class="chips"><template x-for="c in csfSelected.controls" :key="c"><span class="chip" x-text="c"></span></template><span class="muted" x-show="!csfSelected.controls.length">none</span></div>
+                    </div>
+                  </template>
+                  <template x-if="csfSelected.kind === 'control'">
+                    <div>
+                      <div class="label" style="margin-top:14px">Referenced by CSF subcategories</div>
+                      <div class="chips"><template x-for="c in csfSelected.csf" :key="c"><span class="chip" x-text="c"></span></template><span class="muted" x-show="!csfSelected.csf.length">none</span></div>
+                      <div class="label" style="margin-top:14px" x-text="'Enhancements (' + csfSelected.enhancements.length + ')'"></div>
+                      <div class="chips">
+                        <template x-for="e in csfSelected.enhancements" :key="e.id"><span class="chip" :class="e.policies.length ? 'chip-evidenced' : ''" :title="e.title" x-text="e.id + (e.policies.length ? ' · ' + e.policies.map(p => p.id).join(', ') : '')"></span></template>
+                        <span class="muted" x-show="!csfSelected.enhancements.length">none</span>
+                      </div>
+                    </div>
+                  </template>
+
+                  <div class="label" style="margin-top:14px">TLS policies providing evidence</div>
+                  <template x-if="!evidencePolicies(csfSelected).length"><div class="muted">No CCM policy maps here yet.</div></template>
+                  <template x-for="p in evidencePolicies(csfSelected)" :key="p.id + p.control">
+                    <div class="policy-row">
+                      <span class="status" :class="'status-' + p.status"><span class="status-icon" x-text="statusIcon(p.status)"></span><span x-text="p.id"></span></span>
+                      <span class="muted" x-text="p.name + ' via ' + p.control"></span>
+                      <template x-for="e in p.endpoints" :key="e.endpoint"><span class="chip" :class="'chip-' + e.outcome" x-text="e.endpoint + ' · ' + e.outcome"></span></template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="csfSelected.kind !== 'subcategory' && csfSelected.kind !== 'control'">
+                <div class="csf-rollup"><template x-for="row in rollup(csfSelected)" :key="row.status"><span class="status" :class="'status-' + row.status"><span class="status-icon" x-text="row.icon"></span><span x-text="row.count + ' ' + row.label"></span></span></template></div>
+              </template>
+            </div>
+          </template>
+        </aside>
+      </div>
+
+      <div class="table-wrap" x-show="csfView === 'table' && fw === 'csf'">
+        <table>
+          <thead><tr><th>Function</th><th>Category</th><th>Subcategory</th><th>Statement</th><th>800-53 refs</th><th>TLS policies</th><th>Status</th></tr></thead>
+          <tbody>
+            <template x-for="row in csfRows()" :key="row.id">
+              <tr>
+                <td x-text="row.functionId"></td>
+                <td x-text="row.categoryId"></td>
+                <td x-text="row.id"></td>
+                <td class="wrap" x-text="row.statement"></td>
+                <td x-text="row.controls.length"></td>
+                <td x-text="row.policies.map(p => p.id).join(', ') || '—'"></td>
+                <td><span class="status" :class="'status-' + row.status"><span class="status-icon" x-text="statusIcon(row.status)"></span><span x-text="statusLabel(row.status)"></span></span></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <div class="table-wrap" x-show="csfView === 'table' && fw === 'sp800-53'">
+        <table>
+          <thead><tr><th>Family</th><th>Control</th><th>Title</th><th>Enhancements</th><th>CSF refs</th><th>TLS policies</th><th>Status</th></tr></thead>
+          <tbody>
+            <template x-for="row in spRows()" :key="row.id">
+              <tr>
+                <td x-text="row.familyId"></td>
+                <td x-text="row.id"></td>
+                <td class="wrap" x-text="row.title"></td>
+                <td x-text="row.enhancements.length"></td>
+                <td x-text="row.csf.join(', ') || '—'"></td>
+                <td x-text="evidencePolicies(row).map(p => p.id + ' via ' + p.control).join(', ') || '—'"></td>
+                <td><span class="status" :class="'status-' + row.status"><span class="status-icon" x-text="statusIcon(row.status)"></span><span x-text="statusLabel(row.status)"></span></span></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Endpoint</th>
+            <th>Outcome</th>
+            <th>Scanner</th>
+            <th>Policy</th>
+            <th>TLS</th>
+            <th>Cipher</th>
+            <th>Certificate</th>
+            <th>Last checked</th>
+            <th>Check time</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="row in results" :key="row.endpoint">
+            <tr>
+              <td x-text="row.endpoint"></td>
+              <td><span class="pill" :class="row.outcome" x-text="row.outcome"></span></td>
+              <td x-text="row.scanner || '—'"></td>
+              <td x-text="row.policy_id || '—'"></td>
+              <td x-text="row.tls_version || '—'"></td>
+              <td x-text="row.cipher || '—'"></td>
+              <td :title="(row.certificate_subject || '') + ' / ' + (row.certificate_issuer || '')"
+                  x-text="row.certificate_expires_at || '—'"></td>
+              <td :title="row.scan_id ? 'Scan ' + row.scan_id : ''" x-text="datetime(row.checked_at || row.scan_started_at)"></td>
+              <td x-text="duration(row.duration_seconds)"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      <div class="empty" x-show="!loading && !results.length">No endpoints match the selected filters.</div>
+    </div>
+
+    <details class="history" x-show="scans.length">
+      <summary>Scan history <span class="muted" x-text="'(' + scans.length + ' most recent runs)'"></span></summary>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Started</th><th>Scanner</th><th>Outcome</th><th>Endpoints</th><th>Duration</th><th>Scan id</th></tr></thead>
+          <tbody>
+            <template x-for="run in scans" :key="run.scan_id">
+              <tr>
+                <td x-text="datetime(run.started_at)"></td>
+                <td x-text="run.scanner || '—'"></td>
+                <td><span class="pill" :class="run.outcome" x-text="run.outcome || '—'"></span></td>
+                <td x-text="run.endpoints"></td>
+                <td x-text="duration(run.duration_seconds)"></td>
+                <td class="muted" x-text="run.scan_id"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </main>
+
+  <script src="/sunburst.js"></script>
+  <script src="/sunburst-zoom.js"></script>
+  <script>
+    function dashboard() {
+      return {
+        results: [],
+        scans: [],
+        scanners: [],
+        scanner: '',
+        outcome: '',
+        loading: false,
+        error: '',
+        csf: null,
+        sp: null,
+        fw: location.hash.startsWith('#sp800-53') ? 'sp800-53' : 'csf',  // deep-linkable: #csf, #csf/PR, #sp800-53, #sp800-53/SC, #sp800-53/SC-8
+        csfZoomable: location.hash.startsWith('#csf/'),  // a CSF deep link implies the zoomable wheel
+        csfZoom: null,
+        csfZoomer: null,
+        csfView: 'chart',
+        csfSelected: null,
+        csfPinned: false,
+
+        async loadCsf() {
+          // Sequential on purpose: the dashboard pod is small, and the gateway times out slow concurrent requests.
+          await this.loadFramework('csf', '/api/csf');
+          await this.loadFramework('sp', '/api/sp800-53');
+        },
+        async loadFramework(key, url) {
+          try {
+            const r = await fetch(url);
+            if (!r.ok) throw new Error(await r.text());
+            this[key] = await r.json();
+            if (key === 'sp') this.$nextTick(() => this.mountZoomable());
+            if (key === 'csf' && this.csfZoomable) this.$nextTick(() => this.mountCsfZoomable());
+          } catch (e) {
+            this.error = 'Unable to load ' + url + ': ' + e.message;
+          }
+        },
+        spZoom: null,
+        zoomable: null,
+        mountZoomable() {
+          const { data, options } = sp80053ZoomHierarchy(this.sp);
+          this.zoomable = renderZoomableSunburst(this.$refs.zoomable, data, options, {
+            onHover: id => { if (!this.csfPinned) this.csfSelected = findSp80053Node(this.sp, id); },
+            onLeave: () => { if (!this.csfPinned) this.csfSelected = null; },
+            onPin: id => { this.csfPinned = !(this.csfPinned && this.csfSelected && this.csfSelected.id === id); this.csfSelected = findSp80053Node(this.sp, id); },
+            onZoom: id => { this.spZoom = id; this.csfPinned = false; history.replaceState(null, '', '#sp800-53' + (id ? '/' + id : '')); },
+          });
+          const target = location.hash.split('/')[1];
+          if (target) {
+            const node = this.zoomable.root.descendants().find(d => d.data.id === decodeURIComponent(target) && d.children);
+            if (node) this.zoomable.zoomTo(node, true);  // deep link: land there, no animation
+          }
+        },
+        zoomOut() {
+          const z = this.fw === 'csf' ? this.csfZoomer : this.zoomable;
+          if (z) z.zoomTo(z.root);
+        },
+        zoomed() { return this.fw === 'csf' ? !!this.csfZoom : !!this.spZoom; },
+        toggleCsfZoom() {
+          this.csfZoomable = !this.csfZoomable;
+          this.csfSelected = null; this.csfPinned = false; this.csfZoom = null;
+          history.replaceState(null, '', '#csf');
+          if (this.csfZoomable && this.csf) this.$nextTick(() => this.mountCsfZoomable());
+        },
+        mountCsfZoomable() {
+          const { data, options } = csfZoomHierarchy(this.csf);
+          this.csfZoomer = renderZoomableSunburst(this.$refs.csfZoomable, data, options, {
+            onHover: id => { if (!this.csfPinned) this.csfSelected = findCsfNode(this.csf, id); },
+            onLeave: () => { if (!this.csfPinned) this.csfSelected = null; },
+            onPin: id => { this.csfPinned = !(this.csfPinned && this.csfSelected && this.csfSelected.id === id); this.csfSelected = findCsfNode(this.csf, id); },
+            onZoom: id => { this.csfZoom = id; this.csfPinned = false; history.replaceState(null, '', '#csf' + (id ? '/' + id : '')); },
+          });
+          const target = location.hash.startsWith('#csf/') ? location.hash.split('/')[1] : '';
+          if (target) {
+            const node = this.csfZoomer.root.descendants().find(d => d.data.id === decodeURIComponent(target) && d.children);
+            if (node) this.csfZoomer.zoomTo(node, true);
+          }
+        },
+        current() { return this.fw === 'csf' ? this.csf : this.sp; },
+        switchFw(fw) {
+          this.fw = fw; this.csfSelected = null; this.csfPinned = false;
+          history.replaceState(null, '', '#' + fw + (fw === 'csf' && this.csfZoom ? '/' + this.csfZoom : (fw === 'sp800-53' && this.spZoom ? '/' + this.spZoom : '')));
+        },
+        svg() {
+          if (!this.csf) return '';
+          const { root, options } = csfHierarchy(this.csf);
+          return renderSunburst(root, options);
+        },
+        csfColor(fnId) { return `var(--csf-${fnId.toLowerCase()})`; },
+        csfHover(event) { if (!this.csfPinned) this.csfSelect(event.target.closest('[data-id]')); },
+        csfLeave() { if (!this.csfPinned) this.csfSelected = null; },
+        csfClick(event) {
+          const el = event.target.closest('[data-id]');
+          if (!el) return;
+          if (this.csfPinned && this.csfSelected && this.csfSelected.id === el.dataset.id) { this.csfPinned = false; return; }
+          this.csfPinned = true;
+          this.csfSelect(el);
+        },
+        csfSelect(el) {
+          const data = this.current();
+          if (!el || !data) return;
+          this.csfSelected = this.fw === 'csf' ? findCsfNode(data, el.dataset.id) : findSp80053Node(data, el.dataset.id);
+        },
+        evidencePolicies(node) {
+          if (node.kind === 'control' || node.enhancements) return [...node.policies, ...node.enhancements.flatMap(e => e.policies)];
+          return node.policies || [];
+        },
+        csfRows() {
+          if (!this.csf) return [];
+          return this.csf.functions.flatMap(f => f.categories.flatMap(c => c.subcategories.map(s => ({ ...s, functionId: f.id, categoryId: c.id }))));
+        },
+        spRows() {
+          if (!this.sp) return [];
+          return this.sp.families.flatMap(f => f.controls.map(c => ({ ...c, familyId: f.id })));
+        },
+        summaryChips() { const data = this.current(); return data ? summaryRows(data.summary) : []; },
+        rollup(node) {
+          if (node.kind === 'function') return rollupRows(node.categories.flatMap(c => c.subcategories));
+          if (node.kind === 'category') return rollupRows(node.subcategories);
+          if (node.kind === 'family') return rollupRows(node.controls);
+          return [];
+        },
+        statusIcon(status) { return STATUS[status] ? STATUS[status].icon : '·'; },
+        statusLabel(status) { return STATUS[status] ? STATUS[status].label : status; },
+        titleCase(text) { return (text || '').toLowerCase().replace(/(^|\s)\S/g, m => m.toUpperCase()); },
+
+        async load() {
+          this.loading = true;
+          this.error = '';
+          const params = new URLSearchParams({ limit: '500' });
+          if (this.scanner) params.set('scanner', this.scanner);
+          if (this.outcome) params.set('outcome', this.outcome);
+          try {
+            const response = await fetch('/api/results?' + params);
+            if (!response.ok) throw new Error(await response.text());
+            const data = await response.json();
+            this.results = data.results;
+            this.scanners = [...new Set(this.results.map(x => x.scanner).filter(Boolean))];
+            const history = await fetch('/api/scans?limit=50');
+            if (history.ok) this.scans = (await history.json()).scans;
+          } catch (e) {
+            this.error = 'Unable to load Neo4j results: ' + e.message;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        count(outcome) {
+          return this.results.filter(x => x.outcome === outcome).length;
+        },
+
+        get lastScan() { return this.scans.find(run => run.started_at) || null; },  // newest run with a timestamp
+
+        datetime(iso) {
+          if (!iso) return '—';
+          const date = new Date(iso);
+          return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+        },
+
+        duration(seconds) {
+          if (seconds == null || Number.isNaN(Number(seconds))) return '—';
+          const s = Number(seconds);
+          if (s < 1) return Math.round(s * 1000) + ' ms';
+          if (s < 60) return s.toFixed(2) + ' s';
+          return Math.floor(s / 60) + 'm ' + Math.round(s % 60) + 's';
+        },
+      };
+    }
+  </script>
+</body>
+</html>

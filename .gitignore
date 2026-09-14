@@ -1,0 +1,24 @@
+.venv*/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# Test and coverage output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Python packaging output
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Local OS files
+.DS_Store

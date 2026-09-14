@@ -1,0 +1,33 @@
+{
+  "endpoints": [
+    "example.com",
+    "www.python.org"
+  ],
+  "timeout_seconds": 10,
+  "policies": [
+    {
+      "name": "unreachable-or-invalid",
+      "id": "CCM-TLS-01",
+      "expression": "!result.reachable || !result.certificate_valid || !result.hostname_verified",
+      "outcome": "fail"
+    },
+    {
+      "name": "certificate-expires-within-seven-days",
+      "id": "CCM-TLS-02",
+      "expression": "result.expires_in_seconds >= 0 && result.expires_in_seconds < 604800",
+      "outcome": "warn"
+    },
+    {
+      "name": "require-tls-1-2-or-newer",
+      "id": "CCM-TLS-03",
+      "expression": "result.tls_version != 'TLSv1.2' && result.tls_version != 'TLSv1.3'",
+      "outcome": "fail"
+    },
+    {
+      "name": "cipher-suite-compliance",
+      "id": "CCM-TLS-04",
+      "expression": "!(result.tls_version == 'TLSv1.2' && (result.cipher == 'ECDHE-RSA-AES128-GCM-SHA256' || result.cipher == 'ECDHE-RSA-AES256-GCM-SHA384' || result.cipher == 'ECDHE-ECDSA-AES128-GCM-SHA256' || result.cipher == 'ECDHE-ECDSA-AES256-GCM-SHA384')) && !(result.tls_version == 'TLSv1.3' && (result.cipher == 'TLS_AES_128_GCM_SHA256' || result.cipher == 'TLS_AES_256_GCM_SHA384' || result.cipher == 'TLS_CHACHA20_POLY1305_SHA256'))",
+      "outcome": "fail"
+    }
+  ]
+}

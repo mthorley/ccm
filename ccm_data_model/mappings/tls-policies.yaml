@@ -1,0 +1,37 @@
+# Maps TLS scanner CEL policies (Policy.id in Neo4j) to the NIST SP 800-53 Rev 5 controls they
+# provide evidence for. Ingested as (:Policy)-[:SUPPORTS]->(:Control). CSF 2.0 coverage is derived
+# through the OLIR linkage, (:CsfSubcategory)-[:REFERENCES]->(:Control), rather than mapped here.
+# Control ids accept SC-8, SC-08, sc-8.1 or SC-8(1); every id must exist in the catalog or
+# ingestion fails before writing anything. The mapping is pinned to one framework version: when
+# NIST publishes a new revision, review the controls and bump `version` deliberately.
+framework: nist-sp-800-53
+version: "5.2.0"
+mappings:
+  - policy_id: CCM-TLS-01
+    name: unreachable-or-invalid
+    controls:
+      - id: SC-8
+        rationale: An untrusted or hostname-mismatched certificate means transmission confidentiality and integrity are not assured.
+      - id: SC-17
+        rationale: Server certificates must be issued and validated under an approved PKI certificate policy.
+      - id: SC-23
+        rationale: Certificate and hostname validation are how a client establishes the authenticity of a TLS session.
+  - policy_id: CCM-TLS-02
+    name: certificate-expires-within-seven-days
+    controls:
+      - id: SC-17
+        rationale: Certificate lifecycle (renewal before expiry) is part of PKI certificate management.
+  - policy_id: CCM-TLS-03
+    name: require-tls-1-2-or-newer
+    controls:
+      - id: SC-8(1)
+        rationale: Legacy protocol versions weaken the cryptographic protection of information in transmission.
+      - id: SC-13
+        rationale: Only approved cryptographic protocols may be used; TLS 1.0/1.1 are not.
+  - policy_id: CCM-TLS-04
+    name: cipher-suite-compliance
+    controls:
+      - id: SC-8(1)
+        rationale: Weak cipher suites undermine the cryptographic protection of information in transmission.
+      - id: SC-13
+        rationale: Cipher suites must be drawn from the approved cryptography list.
