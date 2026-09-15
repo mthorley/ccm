@@ -212,10 +212,18 @@ td.wrap { white-space: normal; min-width: 320px; }
   .csf-head { display: block; }
 }
 
-.segmented { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.segmented button { border: 0; border-radius: 0; background: var(--panel); color: var(--muted); }
-.segmented button + button { border-left: 1px solid var(--line); }
-.segmented button.active, .controls > button.active { background: #2b6e62; color: var(--text); }
+/* Folder-style tabs: the strip is a distinctly lighter band; the selected tab is cut from it in the page colour,
+   carries an accent line on top and flows into the panel below, with concave "outside" curves where it meets the
+   strip (transparent pseudo-elements whose rounded box-shadow paints the corner). Inactive tabs sit flat on the strip. */
+.tabs { --strip: #22303c; display: flex; align-items: flex-end; gap: 2px; background: var(--strip); border: 1px solid var(--line); border-bottom: 0; border-radius: 8px 8px 0 0; padding: 8px 16px 0; margin-bottom: 18px; }
+.tabs [role="tab"] { position: relative; border: 0; border-top: 3px solid transparent; border-radius: 10px 10px 0 0; background: transparent; color: var(--muted); padding: 9px 20px 12px; font-size: 14px; font-weight: 400; }
+.tabs [role="tab"]:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
+.tabs [role="tab"][aria-selected="true"] { background: var(--bg); color: var(--text); font-weight: 600; border-top-color: #3a8d7d; z-index: 1; }
+.tabs [role="tab"][aria-selected="true"]::before, .tabs [role="tab"][aria-selected="true"]::after { content: ''; position: absolute; bottom: 0; width: 14px; height: 14px; background: transparent; pointer-events: none; }
+.tabs [role="tab"][aria-selected="true"]::before { left: -14px; border-bottom-right-radius: 14px; box-shadow: 7px 7px 0 7px var(--bg); }
+.tabs [role="tab"][aria-selected="true"]::after { right: -14px; border-bottom-left-radius: 14px; box-shadow: -7px 7px 0 7px var(--bg); }
+.tabs [role="tab"]:focus-visible { outline: 2px solid #3a8d7d; outline-offset: -2px; }
+.controls > button.active { background: #2b6e62; color: var(--text); }
 .sunburst path.emphasis { stroke: var(--panel); }
 .sunburst .arc-label.emphasis { fill: var(--text); font-weight: 600; }
 .chip-evidenced { border-color: var(--accent); }

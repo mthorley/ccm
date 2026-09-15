@@ -1,37 +1,85 @@
-# Maps TLS scanner CEL policies (Policy.id in Neo4j) to the NIST SP 800-53 Rev 5 controls they
-# provide evidence for. Ingested as (:Policy)-[:SUPPORTS]->(:Control). CSF 2.0 coverage is derived
-# through the OLIR linkage, (:CsfSubcategory)-[:REFERENCES]->(:Control), rather than mapped here.
-# Control ids accept SC-8, SC-08, sc-8.1 or SC-8(1); every id must exist in the catalog or
-# ingestion fails before writing anything. The mapping is pinned to one framework version: when
-# NIST publishes a new revision, review the controls and bump `version` deliberately.
-framework: nist-sp-800-53
-version: "5.2.0"
+# What each TLS scanner CEL policy (Policy.id in Neo4j) provides evidence for, in two frameworks:
+#
+#   subcategories: NIST CSF 2.0 subcategories the check evidences -> (:Policy)-[:SUPPORTS]->(:CsfSubcategory).
+#   controls:      NIST SP 800-53 controls the check *itself* evidences -> (:Policy)-[:SUPPORTS]->(:Control).
+#                  Deliberately narrow: list a control only where the check directly verifies what the control
+#                  requires. The dashboard separately derives "related" controls from the CSF subcategories through
+#                  NIST's OLIR references and labels those as derived, not as evidence. Ids accept SC-8, SC-08, sc-8.1 or SC-8(1).
+#   techniques:    MITRE ATT&CK techniques the check *genuinely mitigates* -> (:Policy)-[:MITIGATES]->(:Technique).
+#                  Deliberately narrow: list a technique only where the check itself reduces its chance of success.
+#
+# Every id must exist in the loaded catalog or ingestion fails before writing anything. The mapping is pinned to
+# framework versions: when NIST or MITRE publish a new revision, review the ids and bump the version deliberately.
+frameworks:
+  nist-csf: "2.0"
+  nist-sp-800-53: "5.2.0"
+  mitre-attack-enterprise: "16.1"
 mappings:
   - policy_id: CCM-TLS-01
     name: unreachable-or-invalid
+    subcategories:
+      - id: PR.DS-02  # The confidentiality, integrity, and availability of data-in-transit are protected
+        rationale: An untrusted or hostname-mismatched certificate means data in transit to this endpoint is not protected.
+      - id: PR.AA-01  # Identities and credentials for authorized users, services, and hardware are managed by the organization
+        rationale: A server certificate is a service credential; presenting a valid, trusted one shows it is managed.
     controls:
-      - id: SC-8
-        rationale: An untrusted or hostname-mismatched certificate means transmission confidentiality and integrity are not assured.
-      - id: SC-17
-        rationale: Server certificates must be issued and validated under an approved PKI certificate policy.
-      - id: SC-23
-        rationale: Certificate and hostname validation are how a client establishes the authenticity of a TLS session.
+      - id: SC-8      # Transmission Confidentiality and Integrity
+        rationale: The check verifies the endpoint offers an authenticated TLS channel; an untrusted or mismatched certificate means transmitted information is not protected.
+      - id: SC-17     # Public Key Infrastructure Certificates
+        rationale: A certificate that chains to a trusted authority and matches the host is direct evidence it was issued under an approved certificate policy or provider.
+      - id: SC-23     # Session Authenticity
+        rationale: Certificate and hostname validation are the mechanism by which a client establishes the authenticity of the session.
+    techniques:
+      - id: T1557     # Adversary-in-the-Middle
+        rationale: A valid, trusted certificate whose name matches the host lets clients detect an impersonating endpoint, which is what an adversary-in-the-middle relies on.
+      - id: T1565.002 # Transmitted Data Manipulation
+        rationale: An authenticated TLS session gives integrity protection to data in transit; an untrusted certificate leaves the channel open to manipulation.
   - policy_id: CCM-TLS-02
     name: certificate-expires-within-seven-days
+    subcategories:
+      - id: PR.AA-01  # Identities and credentials for authorized users, services, and hardware are managed by the organization
+        rationale: Renewing certificates before they expire is credential lifecycle management for services.
+      - id: ID.AM-08  # Systems, hardware, software, services, and data are managed throughout their life cycles
+        rationale: Certificates are managed assets with an expiry; tracking them to renewal is lifecycle management.
     controls:
-      - id: SC-17
-        rationale: Certificate lifecycle (renewal before expiry) is part of PKI certificate management.
+      - id: SC-17     # Public Key Infrastructure Certificates
+        rationale: Renewing certificates before expiry is part of managing them under the certificate policy this control requires.
+    techniques: []   # operational hygiene; an approaching expiry does not by itself mitigate a technique
   - policy_id: CCM-TLS-03
     name: require-tls-1-2-or-newer
+    subcategories:
+      - id: PR.DS-02  # The confidentiality, integrity, and availability of data-in-transit are protected
+        rationale: Legacy protocol versions weaken the confidentiality and integrity of data in transit.
+      - id: PR.PS-01  # Configuration management practices are established and applied
+        rationale: A minimum protocol version is a configuration baseline that must be enforced on every endpoint.
     controls:
-      - id: SC-8(1)
-        rationale: Legacy protocol versions weaken the cryptographic protection of information in transmission.
-      - id: SC-13
-        rationale: Only approved cryptographic protocols may be used; TLS 1.0/1.1 are not.
+      - id: SC-8(1)   # Cryptographic Protection
+        rationale: The check verifies the cryptographic mechanism protecting transmission is a current TLS version, not one with known decryption attacks.
+      - id: SC-13     # Cryptographic Protection
+        rationale: TLS 1.2+ is the approved protocol set (NIST SP 800-52); legacy versions are not approved cryptography.
+    techniques:
+      - id: T1040     # Network Sniffing
+        rationale: TLS 1.0/1.1 are subject to practical decryption attacks (BEAST, POODLE-class); enforcing 1.2+ keeps sniffed traffic confidential.
+      - id: T1557     # Adversary-in-the-Middle
+        rationale: Legacy protocol versions enable downgrade and renegotiation attacks used to insert an adversary into the session.
+      - id: T1565.002 # Transmitted Data Manipulation
+        rationale: Modern TLS versions provide AEAD integrity protection that prevents undetected modification of data in transit.
   - policy_id: CCM-TLS-04
     name: cipher-suite-compliance
+    subcategories:
+      - id: PR.DS-02  # The confidentiality, integrity, and availability of data-in-transit are protected
+        rationale: Weak cipher suites undermine the encryption protecting data in transit.
+      - id: PR.PS-01  # Configuration management practices are established and applied
+        rationale: The approved cipher-suite list is an enforced configuration baseline.
     controls:
-      - id: SC-8(1)
-        rationale: Weak cipher suites undermine the cryptographic protection of information in transmission.
-      - id: SC-13
-        rationale: Cipher suites must be drawn from the approved cryptography list.
+      - id: SC-8(1)   # Cryptographic Protection
+        rationale: The check verifies the negotiated cipher is an approved AEAD suite, i.e. the transmission is actually protected by strong cryptography.
+      - id: SC-13     # Cryptographic Protection
+        rationale: Only cipher suites from the approved list are accepted, which is what this control requires of cryptography in use.
+    techniques:
+      - id: T1040     # Network Sniffing
+        rationale: Weak or export-grade cipher suites allow captured traffic to be decrypted; approved AEAD suites keep it confidential.
+      - id: T1557     # Adversary-in-the-Middle
+        rationale: Non-forward-secret or weak suites let an adversary who obtains the key decrypt or interpose on sessions.
+      - id: T1565.002 # Transmitted Data Manipulation
+        rationale: Approved suites include authenticated encryption, so tampering with data in transit is detected.

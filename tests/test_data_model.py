@@ -7,11 +7,12 @@ import yaml
 from ccm_data_model.build_csf_catalog import build_catalog
 from ccm_data_model.build_csf_linkage import build_linkage, normalise_control_id
 from ccm_data_model.catalog import (
-    load_attack_mappings, load_attack_stix, load_catalog, load_csf_linkage, load_policy_mappings, load_sp800_53,
+    load_attack_mappings, load_attack_stix, load_catalog, load_csf_linkage, load_policy_control_mappings, load_policy_mappings,
+    load_policy_technique_mappings, load_sp800_53,
 )
 from ccm_data_model.graph import (
-    attack_mapping_statements, attack_statements, csf_statements, key_for, linkage_statements, mapping_statements,
-    sp800_53_statements,
+    attack_mapping_statements, attack_statements, control_mapping_statements, csf_statements, key_for, linkage_statements,
+    mapping_statements, policy_technique_statements, sp800_53_statements,
 )
 
 ROOT = Path(__file__).resolve().parent.parent / "ccm_data_model"
@@ -132,36 +133,55 @@ def test_csf_linkage_covers_every_subcategory(catalog, sp800_53):
     }
 
 
-def test_tls_policy_mappings_resolve_against_sp800_53(sp800_53):
-    mappings = load_policy_mappings(MAPPINGS, sp800_53)
+def test_tls_policy_mappings_resolve_against_csf(catalog):
+    mappings = load_policy_mappings(MAPPINGS, catalog)
 
     assert {m.policy_id for m in mappings} == {"CCM-TLS-01", "CCM-TLS-02", "CCM-TLS-03", "CCM-TLS-04"}
-    assert {m.control_id for m in mappings if m.policy_id == "CCM-TLS-03"} == {"SC-8(1)", "SC-13"}
+    assert {m.subcategory_id for m in mappings if m.policy_id == "CCM-TLS-03"} == {"PR.DS-02", "PR.PS-01"}
     assert all(m.rationale for m in mappings)
+
+
+def test_tls_policy_control_mappings_are_narrow_and_resolve(sp800_53):
+    mappings = load_policy_control_mappings(MAPPINGS, sp800_53)
+
+    assert {m.policy_id for m in mappings} == {"CCM-TLS-01", "CCM-TLS-02", "CCM-TLS-03", "CCM-TLS-04"}
+    assert {m.control_id for m in mappings} == {"SC-8", "SC-8(1)", "SC-13", "SC-17", "SC-23"}  # no CM-6 / IA-5 style stretches
+    assert all(m.rationale for m in mappings)
+    statements = control_mapping_statements(mappings, sp800_53.framework, "tls-policies.yaml")
+    assert "target:Control" in statements[-1][0] and "target:CsfSubcategory" not in statements[-1][0]  # prune scoped by label
+    assert ["CCM-TLS-03", "nist-sp-800-53:5.2.0/SC-8(1)"] in statements[-1][1]["pairs"]
 
 
 def test_unknown_control_in_mapping_is_rejected(sp800_53, tmp_path):
     path = tmp_path / "bad.yaml"
-    path.write_text(yaml.safe_dump({"mappings": [{"policy_id": "CCM-TLS-99", "controls": ["SC-8", "ZZ-99"]}]}))
+    path.write_text(yaml.safe_dump({"frameworks": {"nist-sp-800-53": "5.2.0"}, "mappings": [{"policy_id": "CCM-TLS-99", "controls": ["SC-8", "ZZ-99"]}]}))
 
     with pytest.raises(ValueError, match="CCM-TLS-99 -> ZZ-99"):
-        load_policy_mappings(path, sp800_53)
+        load_policy_control_mappings(path, sp800_53)
 
 
-def test_mapping_for_other_framework_is_rejected(sp800_53, tmp_path):
+def test_unknown_subcategory_in_mapping_is_rejected(catalog, tmp_path):
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump({"frameworks": {"nist-csf": "2.0"}, "mappings": [{"policy_id": "CCM-TLS-99", "subcategories": ["PR.DS-02", "XX.YY-99"]}]}))
+
+    with pytest.raises(ValueError, match="CCM-TLS-99 -> XX.YY-99"):
+        load_policy_mappings(path, catalog)
+
+
+def test_mapping_for_other_framework_is_rejected(catalog, tmp_path):
     path = tmp_path / "other.yaml"
-    path.write_text(yaml.safe_dump({"framework": "nist-csf", "mappings": []}))
+    path.write_text(yaml.safe_dump({"framework": "nist-sp-800-53", "mappings": []}))
 
-    with pytest.raises(ValueError, match="nist-csf"):
-        load_policy_mappings(path, sp800_53)
+    with pytest.raises(ValueError, match="nist-sp-800-53"):
+        load_policy_mappings(path, catalog)
 
 
-def test_mapping_pinned_to_another_version_is_rejected(sp800_53, tmp_path):
+def test_mapping_pinned_to_another_version_is_rejected(catalog, tmp_path):
     path = tmp_path / "old.yaml"
-    path.write_text(yaml.safe_dump({"framework": "nist-sp-800-53", "version": "5.1.1", "mappings": []}))
+    path.write_text(yaml.safe_dump({"frameworks": {"nist-csf": "1.1"}, "mappings": []}))
 
-    with pytest.raises(ValueError, match="version is '5.1.1' but the loaded catalog is '5.2.0'"):
-        load_policy_mappings(path, sp800_53)
+    with pytest.raises(ValueError, match="version is '1.1' but the loaded catalog is '2.0'"):
+        load_policy_mappings(path, catalog)
 
 
 def test_linkage_pinned_to_another_version_is_rejected(catalog, sp800_53, tmp_path):
@@ -174,13 +194,13 @@ def test_linkage_pinned_to_another_version_is_rejected(catalog, sp800_53, tmp_pa
 
 def test_graph_statements_scope_every_node_to_its_framework_version(catalog, sp800_53):
     linkage = load_csf_linkage(LINKAGE, catalog, sp800_53)
-    mappings = load_policy_mappings(MAPPINGS, sp800_53)
+    mappings = load_policy_mappings(MAPPINGS, catalog)
 
     statements = (
         csf_statements(catalog)
         + sp800_53_statements(sp800_53)
         + linkage_statements(linkage, catalog.framework, sp800_53.framework, "nist-csf-2.0-to-sp800-53-rev5.yaml")
-        + mapping_statements(mappings, sp800_53.framework, "tls-policies.yaml")
+        + mapping_statements(mappings, catalog.framework, "tls-policies.yaml")
     )
 
     for _, params in statements:
@@ -193,7 +213,7 @@ def test_graph_statements_scope_every_node_to_its_framework_version(catalog, sp8
     queries = [query for query, _ in statements]
     assert sum("MERGE (control:Control {key: row.key})" in q for q in queries) >= 2
     _, stale_params = statements[-1]
-    assert ["CCM-TLS-03", "nist-sp-800-53:5.2.0/SC-8(1)"] in stale_params["pairs"]
+    assert ["CCM-TLS-03", "nist-csf:2.0/PR.DS-02"] in stale_params["pairs"]
 
 
 def test_attack_stix_bundle_loads_every_object_type_under_one_version(attack):
@@ -269,6 +289,32 @@ def test_attack_statements_scope_nodes_and_edges_to_versions(sp800_53, attack):
         assert fragment in queries
     _, stale = statements[-1]
     assert ["nist-sp-800-53:5.2.0/SC-8", "mitre-attack-enterprise:16.1/T1040"] in stale["pairs"]
+
+
+def test_policy_technique_mappings_resolve_against_bundle(attack):
+    mappings = load_policy_technique_mappings(MAPPINGS, attack)
+
+    assert {m.policy_id for m in mappings} == {"CCM-TLS-01", "CCM-TLS-03", "CCM-TLS-04"}  # TLS-02 deliberately maps nothing
+    assert {m.technique_id for m in mappings} == {"T1040", "T1557", "T1565.002"}
+    assert all(m.rationale for m in mappings)
+    statements = policy_technique_statements(mappings, attack.framework, "tls-policies.yaml")
+    _, stale = statements[-1]
+    assert ["CCM-TLS-03", "mitre-attack-enterprise:16.1/T1040"] in stale["pairs"]
+
+
+def test_policy_technique_mapping_rejects_unknown_or_wrong_version(attack, tmp_path):
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump({"frameworks": {"mitre-attack-enterprise": "16.1"}, "mappings": [{"policy_id": "CCM-TLS-01", "techniques": ["T9999"]}]}))
+    with pytest.raises(ValueError, match="CCM-TLS-01 -> T9999"):
+        load_policy_technique_mappings(path, attack)
+
+    path.write_text(yaml.safe_dump({"frameworks": {"mitre-attack-enterprise": "15.1"}, "mappings": []}))
+    with pytest.raises(ValueError, match="version is '15.1'"):
+        load_policy_technique_mappings(path, attack)
+
+    path.write_text(yaml.safe_dump({"frameworks": {"nist-sp-800-53": "5.2.0"}, "mappings": []}))
+    with pytest.raises(ValueError, match="does not declare a version for 'mitre-attack-enterprise'"):
+        load_policy_technique_mappings(path, attack)
 
 
 def test_normalise_control_id_strips_cprt_zero_padding():

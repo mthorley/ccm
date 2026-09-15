@@ -68,6 +68,16 @@ class Subcategory:
 
 @dataclass(frozen=True)
 class PolicyMapping:
+    """A TLS scanner policy that provides evidence for a CSF subcategory (hand-maintained)."""
+    policy_id: str
+    subcategory_id: str
+    policy_name: str = ""
+    rationale: str = ""
+
+
+@dataclass(frozen=True)
+class PolicyControlMapping:
+    """A TLS scanner policy that itself evidences an SP 800-53 control (hand-maintained, deliberately narrow)."""
     policy_id: str
     control_id: str
     policy_name: str = ""
@@ -463,6 +473,15 @@ class AttackRelation:
 
 
 @dataclass(frozen=True)
+class PolicyTechniqueMapping:
+    """A TLS scanner policy that genuinely mitigates an ATT&CK technique (hand-maintained)."""
+    policy_id: str
+    technique_id: str
+    policy_name: str = ""
+    rationale: str = ""
+
+
+@dataclass(frozen=True)
 class AttackMapping:
     control_id: str  # canonical SP 800-53 id
     technique_id: str
@@ -629,10 +648,43 @@ def load_attack_mappings(path: str | Path, sp800_53: Sp800_53Catalog, attack: At
     return sorted(mappings, key=lambda m: (m.control_id, m.technique_id)), sorted(unknown_techniques)
 
 
+def load_policy_technique_mappings(path: str | Path, attack: AttackCatalog) -> list[PolicyTechniqueMapping]:
+    """Load Policy -> ATT&CK technique mappings, rejecting technique ids that are not in the bundle."""
+    document = _load_yaml(path) or {}
+    _check_target(document, "", attack.framework)
+    techniques = attack.technique_ids()
+    mappings: list[PolicyTechniqueMapping] = []
+    unknown: list[str] = []
+    for entry in document.get("mappings", []):
+        policy_id = str(entry["policy_id"])
+        for target in entry.get("techniques", []) or []:
+            target = {"id": target} if isinstance(target, str) else target
+            technique_id = str(target["id"])
+            if technique_id not in techniques:
+                unknown.append(f"{policy_id} -> {technique_id}")
+                continue
+            mappings.append(PolicyTechniqueMapping(policy_id, technique_id, str(entry.get("name", "")), str(target.get("rationale", ""))))
+    if unknown:
+        raise ValueError("unknown technique ids in mapping file: " + ", ".join(unknown))
+    return mappings
+
+
 # --- mappings --------------------------------------------------------------------------------
 
 def _check_target(document: dict[str, Any], prefix: str, framework: Framework) -> None:
-    """A mapping file names the framework *and version* it was written against; refuse any other."""
+    """A mapping file names the framework *and version* it was written against; refuse any other.
+
+    Accepts either `framework:` + `version:` (one target), `<prefix>_framework:` + `<prefix>_version:`
+    (linkage files), or a `frameworks: {id: version}` map (files that target several frameworks).
+    """
+    frameworks = document.get("frameworks")
+    if isinstance(frameworks, dict):
+        if framework.id not in frameworks:
+            raise ValueError(f"mapping file does not declare a version for {framework.id!r} (frameworks: {sorted(frameworks)})")
+        if str(frameworks[framework.id]) != framework.version:
+            raise ValueError(f"{framework.id} version is {frameworks[framework.id]!r} but the loaded catalog is {framework.version!r}; "
+                             "re-validate the mapping against the new version before pointing it there")
+        return
     framework_key = f"{prefix}_framework" if prefix else "framework"
     version_key = f"{prefix}_version" if prefix else "version"
     declared_framework, declared_version = document.get(framework_key), document.get(version_key)
@@ -678,21 +730,42 @@ def load_csf_linkage(path: str | Path, csf: Catalog, sp800_53: Sp800_53Catalog) 
     return linkage
 
 
-def load_policy_mappings(path: str | Path, sp800_53: Sp800_53Catalog) -> list[PolicyMapping]:
-    """Load Policy -> SP 800-53 control mappings, rejecting control ids that are not in the catalog."""
+def load_policy_mappings(path: str | Path, csf: Catalog) -> list[PolicyMapping]:
+    """Load Policy -> CSF subcategory mappings, rejecting subcategory ids that are not in the catalog."""
     document = _load_yaml(path) or {}
-    _check_target(document, "", sp800_53.framework)
+    _check_target(document, "", csf.framework)
+    known = csf.subcategory_ids()
     mappings: list[PolicyMapping] = []
     unknown: list[str] = []
     for entry in document.get("mappings", []):
         policy_id = str(entry["policy_id"])
-        for target in entry.get("controls", []):
+        for target in entry.get("subcategories", []) or []:
+            target = {"id": target} if isinstance(target, str) else target
+            subcategory_id = str(target["id"])
+            if subcategory_id not in known:
+                unknown.append(f"{policy_id} -> {subcategory_id}")
+                continue
+            mappings.append(PolicyMapping(policy_id, subcategory_id, str(entry.get("name", "")), str(target.get("rationale", ""))))
+    if unknown:
+        raise ValueError("unknown subcategory ids in mapping file: " + ", ".join(unknown))
+    return mappings
+
+
+def load_policy_control_mappings(path: str | Path, sp800_53: Sp800_53Catalog) -> list[PolicyControlMapping]:
+    """Load Policy -> SP 800-53 control mappings, rejecting control ids that are not in the catalog."""
+    document = _load_yaml(path) or {}
+    _check_target(document, "", sp800_53.framework)
+    mappings: list[PolicyControlMapping] = []
+    unknown: list[str] = []
+    for entry in document.get("mappings", []):
+        policy_id = str(entry["policy_id"])
+        for target in entry.get("controls", []) or []:
             target = {"id": target} if isinstance(target, str) else target
             resolved = sp800_53.resolve(str(target["id"]))
             if resolved is None:
                 unknown.append(f"{policy_id} -> {target['id']}")
                 continue
-            mappings.append(PolicyMapping(policy_id, resolved, str(entry.get("name", "")), str(target.get("rationale", ""))))
+            mappings.append(PolicyControlMapping(policy_id, resolved, str(entry.get("name", "")), str(target.get("rationale", ""))))
     if unknown:
         raise ValueError("unknown control ids in mapping file: " + ", ".join(unknown))
     return mappings

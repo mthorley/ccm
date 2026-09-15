@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -81,7 +82,7 @@ def warm_caches() -> None:
     """Open the Neo4j connection and prime the framework caches in the background, so the first
     visitor after a pod restart doesn't pay the cold-start cost (which on a small pod can exceed the gateway timeout)."""
     def warm() -> None:
-        for query, key in ((CSF_TREE_QUERY, "csf"), (SP800_53_TREE_QUERY, "sp800-53")):
+        for query, key in ((CSF_TREE_QUERY, "csf"), (SP800_53_TREE_QUERY, "sp800-53"), (ATTACK_PLACEMENTS_QUERY, "attack-placements"), (ATTACK_TECHNIQUES_QUERY, "attack-techniques")):
             try:
                 _framework_rows(query, key, refresh=False)
             except Exception:  # noqa: BLE001 - warming is best-effort; requests will retry on demand
@@ -122,9 +123,10 @@ def sunburst_zoom_js() -> FileResponse:
 CSF_TREE_QUERY = """
 MATCH (v:FrameworkVersion {framework: 'nist-csf'})-[:CONTAINS]->(f:CsfFunction)-[:CONTAINS]->(c:CsfCategory)-[:CONTAINS]->(s:CsfSubcategory)
 WITH v, f, c, s ORDER BY f.order, c.order, s.order
+OPTIONAL MATCH (s)<-[sup:SUPPORTS]-(p:Policy)
+WITH v, f, c, s, collect(DISTINCT {id: p.id, name: p.name, rationale: sup.rationale}) AS policies
 OPTIONAL MATCH (s)-[:REFERENCES]->(base:Control)
-OPTIONAL MATCH (base)-[:CONTAINS*0..1]->(ctl:Control)<-[:SUPPORTS]-(p:Policy)
-WITH v, f, c, s, collect(DISTINCT base.id) AS controls, collect(DISTINCT {id: p.id, name: p.name, control: ctl.id}) AS policies
+WITH v, f, c, s, policies, collect(DISTINCT base.id) AS controls
 RETURN v.version AS version, f.id AS function_id, f.title AS function_title, f.description AS function_description,
        c.id AS category_id, c.title AS category_title, c.description AS category_description,
        s.id AS subcategory_id, s.statement AS statement, controls,
@@ -187,16 +189,19 @@ def build_csf_tree(rows: list[dict[str, Any]], endpoints: list[dict[str, Any]]) 
     }
 
 
+# Evidence on the SP 800-53 wheel comes only from TLS policies that verify the control itself (the narrow `controls:`
+# section of tls-policies.yaml). CSF subcategories that reference a control (NIST OLIR) are listed as context.
 SP800_53_TREE_QUERY = """
 MATCH (v:FrameworkVersion {framework: 'nist-sp-800-53'})-[:CONTAINS]->(f:ControlFamily)-[:CONTAINS]->(c:Control)
 WHERE coalesce(c.status, '') <> 'withdrawn'
-OPTIONAL MATCH (c)-[:CONTAINS]->(e:Control) WHERE coalesce(e.status, '') <> 'withdrawn'
-OPTIONAL MATCH (c)<-[:SUPPORTS]-(p:Policy)
+OPTIONAL MATCH (c)<-[sup:SUPPORTS]-(p:Policy)
+WITH v, f, c, collect(DISTINCT {id: p.id, name: p.name, control: c.id, rationale: sup.rationale}) AS policies
 OPTIONAL MATCH (c)<-[:REFERENCES]-(s:CsfSubcategory)
-WITH v, f, c, e, collect(DISTINCT {id: p.id, name: p.name, control: c.id}) AS policies, collect(DISTINCT s.id) AS csf
-ORDER BY f.order, c.order, e.order
-OPTIONAL MATCH (e)<-[:SUPPORTS]-(ep:Policy)
-WITH v, f, c, policies, csf, e, collect(DISTINCT {id: ep.id, name: ep.name, control: e.id}) AS enhancement_policies
+WITH v, f, c, policies, collect(DISTINCT s.id) AS csf
+OPTIONAL MATCH (c)-[:CONTAINS]->(e:Control) WHERE coalesce(e.status, '') <> 'withdrawn'
+WITH v, f, c, policies, csf, e ORDER BY f.order, c.order, e.order
+OPTIONAL MATCH (e)<-[esup:SUPPORTS]-(ep:Policy)
+WITH v, f, c, policies, csf, e, collect(DISTINCT {id: ep.id, name: ep.name, control: e.id, rationale: esup.rationale}) AS enhancement_policies
 WITH v, f, c, policies, csf,
      collect(CASE WHEN e IS NULL THEN NULL ELSE {id: e.id, title: e.title, statement: e.statement,
              policies: [x IN enhancement_policies WHERE x.id IS NOT NULL]} END) AS enhancements
@@ -232,7 +237,8 @@ def _summary(nodes: list[dict[str, Any]], key: str) -> dict[str, int]:
 
 
 def build_sp800_53_tree(rows: list[dict[str, Any]], endpoints: list[dict[str, Any]]) -> dict[str, Any]:
-    """Assemble family -> control (-> enhancement) with a status per node; a control's status rolls up its enhancements."""
+    """Assemble family -> control (-> enhancement) with a status per control from the TLS policies that verify it
+    (enhancements roll up into their control)."""
     families: dict[str, dict[str, Any]] = {}
     for row in rows:
         family = families.setdefault(row["family_id"], {"id": row["family_id"], "title": row["family_title"], "controls": []})
@@ -241,12 +247,12 @@ def build_sp800_53_tree(rows: list[dict[str, Any]], endpoints: list[dict[str, An
             policies, status = _with_status(enhancement["policies"], endpoints)
             enhancements.append({**enhancement, "policies": policies, "status": status})
         policies, own_status = _with_status(row["policies"], endpoints)
-        status = _worst([own_status] + [e["status"] for e in enhancements])
+        evidenced = bool(policies) or any(e["policies"] for e in enhancements)
+        status = _worst([own_status] + [e["status"] for e in enhancements]) if evidenced else "unmapped"
         family["controls"].append({
             "id": row["control_id"], "title": row["control_title"], "statement": row["statement"],
             "implementation_level": row["implementation_level"], "csf": sorted(row["csf"]),
-            "policies": policies, "enhancements": enhancements, "status": status,
-            "evidenced": bool(policies) or any(e["policies"] for e in enhancements),
+            "policies": policies, "enhancements": enhancements, "status": status, "evidenced": evidenced,
         })
     tree = list(families.values())
     controls = [c for f in tree for c in f["controls"]]
@@ -273,6 +279,87 @@ def _framework_rows(query: str, cache_key: str, refresh: bool) -> tuple[list[dic
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Neo4j query failed") from exc
     return rows, endpoints
+
+
+ATTACK_PLACEMENTS_QUERY = """
+// Tactic -> parent technique placements (a technique can sit under several tactics), with its live sub-techniques.
+MATCH (v:FrameworkVersion {framework: 'mitre-attack-enterprise'})-[:CONTAINS]->(tactic:Tactic)-[:HAS_TECHNIQUE]->(t:Technique)
+WHERE coalesce(t.parentId, '') = '' AND NOT coalesce(t.revoked, false) AND NOT coalesce(t.deprecated, false)
+WITH v, tactic, t ORDER BY tactic.order, t.id
+OPTIONAL MATCH (t)-[:CONTAINS]->(st:Technique) WHERE NOT coalesce(st.revoked, false) AND NOT coalesce(st.deprecated, false)
+WITH v, tactic, t, st ORDER BY st.id
+WITH v, tactic, t, [x IN collect(st) | x.id] AS subtechniques
+RETURN v.version AS version, tactic.id AS tactic_id, tactic.name AS tactic_name, tactic.order AS tactic_order,
+       t.id AS technique_id, subtechniques
+"""
+
+ATTACK_TECHNIQUES_QUERY = """
+// Per technique: the TLS policies that genuinely mitigate it (the `techniques:` section of the hand-maintained tls-policies.yaml mapping —
+// the transitive path through SP 800-53 is deliberately NOT treated as evidence), the SP 800-53 controls CTID says
+// mitigate it (context only), ATT&CK's own mitigations, detecting data components, and how many groups use it.
+MATCH (t:Technique {framework: 'mitre-attack-enterprise'})
+WHERE NOT coalesce(t.revoked, false) AND NOT coalesce(t.deprecated, false)
+OPTIONAL MATCH (t)<-[pm:MITIGATES]-(p:Policy)
+WITH t, collect(DISTINCT {id: p.id, name: p.name, rationale: pm.rationale}) AS policies
+OPTIONAL MATCH (t)<-[:MITIGATES]-(c:Control)
+WITH t, policies, collect(DISTINCT c.id) AS controls
+OPTIONAL MATCH (m:Mitigation)-[:MITIGATES]->(t) WHERE NOT coalesce(m.deprecated, false)
+WITH t, controls, policies, collect(DISTINCT m.id + ' ' + m.name) AS mitigations
+OPTIONAL MATCH (dc:DataComponent)-[:DETECTS]->(t)
+WITH t, controls, policies, mitigations, collect(DISTINCT dc.id) AS detects
+OPTIONAL MATCH (g:Group)-[:USES]->(t)
+RETURN t.id AS technique_id, t.name AS name, coalesce(t.parentId, '') AS parent_id, t.url AS url,
+       left(t.description, 400) AS description, t.platforms AS platforms, t.tactics AS tactics,
+       controls, [x IN policies WHERE x.id IS NOT NULL] AS policies, mitigations, detects, count(DISTINCT g) AS groups
+"""
+
+
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_CITATION = re.compile(r"\s*\(Citation:[^)]*\)")
+
+
+def _plain_text(markdown: str | None) -> str:
+    """ATT&CK descriptions are markdown with links and citation markers; the panel shows plain text."""
+    return _CITATION.sub("", _MD_LINK.sub(r"\1", markdown or "")).strip()
+
+
+def build_attack_tree(placements: list[dict[str, Any]], techniques: list[dict[str, Any]], endpoints: list[dict[str, Any]]) -> dict[str, Any]:
+    """Assemble tactic -> technique -> sub-technique with a status per technique from TLS policy evidence."""
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in techniques:
+        policies, status = _with_status(row["policies"], endpoints)
+        by_id[row["technique_id"]] = {
+            "id": row["technique_id"], "name": row["name"], "parent_id": row["parent_id"], "url": row["url"],
+            "description": _plain_text(row["description"]), "platforms": row["platforms"] or [], "tactics": row["tactics"] or [],
+            "controls": sorted(row["controls"]), "policies": policies, "mitigations": sorted(row["mitigations"]),
+            "detects": sorted(row["detects"]), "groups": row["groups"], "status": status, "evidenced": bool(policies),
+        }
+    tactics: dict[str, dict[str, Any]] = {}
+    for row in placements:
+        tactic = tactics.setdefault(row["tactic_id"], {"id": row["tactic_id"], "name": row["tactic_name"], "order": row["tactic_order"], "techniques": []})
+        technique = by_id.get(row["technique_id"])
+        if not technique:
+            continue
+        subs = [by_id[sid] for sid in row["subtechniques"] if sid in by_id]
+        # a parent's status rolls up its sub-techniques, like a control rolls up its enhancements
+        status = _worst([technique["status"]] + [s["status"] for s in subs])
+        tactic["techniques"].append({**technique, "subtechniques": subs, "status": status, "evidenced": technique["evidenced"] or any(s["evidenced"] for s in subs)})
+    tree = sorted(tactics.values(), key=lambda t: t["order"] or 0)
+    unique = list(by_id.values())
+    return {
+        "version": placements[0]["version"] if placements else None,
+        "tactics": tree,
+        "endpoints": endpoints,
+        "summary": {**_summary(unique, "techniques"), "placements": sum(len(t["techniques"]) for t in tree)},
+    }
+
+
+@app.get("/api/attack")
+def attack(refresh: bool = False) -> dict[str, Any]:
+    """MITRE ATT&CK tactics -> techniques -> sub-techniques with the techniques TLS policies genuinely mitigate."""
+    placements, endpoints = _framework_rows(ATTACK_PLACEMENTS_QUERY, "attack-placements", refresh)
+    techniques, _ = _framework_rows(ATTACK_TECHNIQUES_QUERY, "attack-techniques", refresh)
+    return build_attack_tree(placements, techniques, endpoints)
 
 
 @app.get("/api/sp800-53")

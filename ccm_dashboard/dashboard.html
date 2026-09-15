@@ -59,18 +59,22 @@
     <div class="error" x-show="error" x-text="error"></div>
 
     <section class="csf" aria-labelledby="csf-title">
-      <div class="csf-head">
+      <div class="tabs" role="tablist" aria-label="Framework coverage" @keydown.arrow-right.prevent="tabStep(1)" @keydown.arrow-left.prevent="tabStep(-1)" @keydown.home.prevent="switchFw(TABS[0].id)" @keydown.end.prevent="switchFw(TABS[TABS.length - 1].id)">
+        <template x-for="tab in TABS" :key="tab.id">
+          <button type="button" role="tab" :id="'tab-' + tab.id" :aria-selected="fw === tab.id" :aria-controls="'panel-' + tab.id" :tabindex="fw === tab.id ? 0 : -1"
+                  :class="{ active: fw === tab.id }" @click="switchFw(tab.id)" x-text="tab.label"></button>
+        </template>
+      </div>
+
+      <div class="csf-head" role="tabpanel" :id="'panel-' + fw" :aria-labelledby="'tab-' + fw">
         <div>
-          <h2 id="csf-title" x-text="fw === 'csf' ? 'NIST CSF ' + (csf ? csf.version : '2.0') + ' coverage' : 'NIST SP 800-53 r' + (sp ? sp.version : '5') + ' coverage'"></h2>
+          <h2 id="csf-title" x-text="fw === 'csf' ? 'NIST CSF ' + (csf ? csf.version : '2.0') + ' coverage' : fw === 'sp800-53' ? 'NIST SP 800-53 r' + (sp ? sp.version : '5') + ' coverage' : 'MITRE ATT&CK v' + (attack ? attack.version : '') + ' coverage'"></h2>
           <div class="subtitle" x-text="fw === 'csf'
             ? 'Functions → categories → subcategories; the outer ring is evidence from TLS policies mapped through SP 800-53'
-            : 'Families → controls (enhancements roll up into their control); highlighted controls have TLS policy evidence'"></div>
+            : fw === 'sp800-53' ? 'Families → controls (enhancements roll up into their control); highlighted controls are verified by a TLS policy itself'
+            : 'Tactics → techniques → sub-techniques; highlighted techniques are ones a TLS policy genuinely mitigates (tls-policies.yaml), not everything reachable through SP 800-53'"></div>
         </div>
         <div class="controls">
-          <div class="segmented" role="group" aria-label="Framework">
-            <button type="button" :class="{ active: fw === 'csf' }" :aria-pressed="fw === 'csf'" @click="switchFw('csf')">CSF 2.0</button>
-            <button type="button" :class="{ active: fw === 'sp800-53' }" :aria-pressed="fw === 'sp800-53'" @click="switchFw('sp800-53')">SP 800-53</button>
-          </div>
           <button type="button" x-show="fw === 'csf' && csfView === 'chart'" :class="{ active: csfZoomable }" :aria-pressed="csfZoomable" @click="toggleCsfZoom()" x-text="csfZoomable ? 'Zoomable ✓' : 'Zoomable'"></button>
           <button type="button" @click="csfView = csfView === 'chart' ? 'table' : 'chart'" x-text="csfView === 'chart' ? 'Table view' : 'Chart view'"></button>
         </div>
@@ -87,17 +91,18 @@
           <div class="sunburst" x-show="fw === 'csf' && !csfZoomable" @mouseover="csfHover($event)" @mouseleave="csfLeave()" @click="csfClick($event)" @keydown.enter="csfClick($event)" x-html="svg()"></div>
           <div class="sunburst" x-show="fw === 'csf' && csfZoomable" x-ref="csfZoomable"></div>
           <div class="sunburst" x-show="fw === 'sp800-53'" x-ref="zoomable"><div class="csf-detail-empty" x-show="!sp" style="padding:40px;text-align:center">Loading SP 800-53 catalog…</div></div>
-          <div class="csf-crumbs" x-show="fw === 'sp800-53' || csfZoomable">
-            <button type="button" class="link" @click="zoomOut()" x-show="zoomed()" x-text="fw === 'csf' ? '← all functions' : '← all families'"></button>
-            <span class="muted" x-show="!zoomed()" x-text="fw === 'csf' ? 'Click a function or category to zoom in; click the centre to go back up.' : 'Click a family to zoom in; click a control to see its enhancements; click the centre to go back up.'"></span>
+          <div class="sunburst" x-show="fw === 'attack'" x-ref="attackZoomable"><div class="csf-detail-empty" x-show="!attack" style="padding:40px;text-align:center">Loading ATT&amp;CK…</div></div>
+          <div class="csf-crumbs" x-show="fw !== 'csf' || csfZoomable">
+            <button type="button" class="link" @click="zoomOut()" x-show="zoomed()" x-text="fw === 'csf' ? '← all functions' : fw === 'sp800-53' ? '← all families' : '← all tactics'"></button>
+            <span class="muted" x-show="!zoomed()" x-text="fw === 'csf' ? 'Click a function or category to zoom in; click the centre to go back up.' : fw === 'sp800-53' ? 'Click a family to zoom in; click a control to see its enhancements; click the centre to go back up.' : 'Click a tactic to zoom in; click a technique to see its sub-techniques; click the centre to go back up.'"></span>
           </div>
           <div class="csf-legend" x-show="fw === 'csf' && csf">
             <template x-for="fn in (csf ? csf.functions : [])" :key="fn.id">
               <span class="legend-item"><i class="swatch" :style="'background:' + csfColor(fn.id)"></i><span x-text="fn.id + ' ' + titleCase(fn.title)"></span></span>
             </template>
           </div>
-          <div class="csf-legend" x-show="fw === 'sp800-53'">
-            <span class="legend-item"><i class="swatch" style="background: var(--accent)"></i><span>Control with TLS policy evidence</span></span>
+          <div class="csf-legend" x-show="fw !== 'csf'">
+            <span class="legend-item"><i class="swatch" style="background: var(--accent)"></i><span x-text="fw === 'attack' ? 'Technique a TLS policy mitigates' : 'Control a TLS policy verifies (evidence)'"></span></span>
             <span class="legend-item"><i class="swatch" style="background: var(--ring-neutral-a-dim)"></i><span>No TLS policy mapped</span></span>
           </div>
         </div>
@@ -112,7 +117,7 @@
               <h3 x-text="csfSelected.id + (csfSelected.title ? ' · ' + csfSelected.title : '')"></h3>
               <p class="csf-statement" x-text="csfSelected.text"></p>
 
-              <template x-if="csfSelected.kind === 'subcategory' || csfSelected.kind === 'control'">
+              <template x-if="csfSelected.kind === 'subcategory' || csfSelected.kind === 'control' || csfSelected.kind === 'technique'">
                 <div>
                   <div class="status" :class="'status-' + csfSelected.status"><span class="status-icon" x-text="statusIcon(csfSelected.status)"></span><span x-text="statusLabel(csfSelected.status)"></span></div>
 
@@ -124,7 +129,7 @@
                   </template>
                   <template x-if="csfSelected.kind === 'control'">
                     <div>
-                      <div class="label" style="margin-top:14px">Referenced by CSF subcategories</div>
+                      <div class="label" style="margin-top:14px">Referenced by CSF subcategories (NIST OLIR)</div>
                       <div class="chips"><template x-for="c in csfSelected.csf" :key="c"><span class="chip" x-text="c"></span></template><span class="muted" x-show="!csfSelected.csf.length">none</span></div>
                       <div class="label" style="margin-top:14px" x-text="'Enhancements (' + csfSelected.enhancements.length + ')'"></div>
                       <div class="chips">
@@ -134,18 +139,37 @@
                     </div>
                   </template>
 
+                  <template x-if="csfSelected.kind === 'technique'">
+                    <div>
+                      <div class="muted" style="margin-top:8px"><span x-text="csfSelected.tactics.join(', ')"></span> · <span x-text="csfSelected.platforms.join(', ')"></span> · <span x-text="csfSelected.groups + ' groups use it'"></span> · <a :href="csfSelected.url" target="_blank" rel="noopener">attack.mitre.org</a></div>
+                      <div class="label" style="margin-top:14px" x-text="'SP 800-53 controls CTID maps as mitigating it (' + csfSelected.controls.length + ')'"></div>
+                      <div class="chips"><template x-for="c in csfSelected.controls" :key="c"><span class="chip" x-text="c"></span></template><span class="muted" x-show="!csfSelected.controls.length">none in the CTID mapping</span></div>
+                      <div class="label" style="margin-top:14px">ATT&amp;CK mitigations</div>
+                      <div class="chips"><template x-for="m in csfSelected.mitigations" :key="m"><span class="chip" x-text="m"></span></template><span class="muted" x-show="!csfSelected.mitigations.length">none</span></div>
+                      <div class="label" style="margin-top:14px">Detected by</div>
+                      <div class="chips"><template x-for="d in csfSelected.detects" :key="d"><span class="chip" x-text="d"></span></template><span class="muted" x-show="!csfSelected.detects.length">none</span></div>
+                      <div class="label" style="margin-top:14px" x-text="'Sub-techniques (' + csfSelected.subtechniques.length + ')'"></div>
+                      <div class="chips">
+                        <template x-for="st in csfSelected.subtechniques" :key="st.id"><span class="chip" :class="st.evidenced ? 'chip-evidenced' : ''" :title="st.name" x-text="st.id + ' ' + st.name"></span></template>
+                        <span class="muted" x-show="!csfSelected.subtechniques.length">none</span>
+                      </div>
+                    </div>
+                  </template>
+
+                  <div>
                   <div class="label" style="margin-top:14px">TLS policies providing evidence</div>
                   <template x-if="!evidencePolicies(csfSelected).length"><div class="muted">No CCM policy maps here yet.</div></template>
                   <template x-for="p in evidencePolicies(csfSelected)" :key="p.id + p.control">
                     <div class="policy-row">
                       <span class="status" :class="'status-' + p.status"><span class="status-icon" x-text="statusIcon(p.status)"></span><span x-text="p.id"></span></span>
-                      <span class="muted" x-text="p.name + ' via ' + p.control"></span>
+                      <span class="muted" x-text="p.control ? p.name + ' via ' + p.control : p.rationale"></span>
                       <template x-for="e in p.endpoints" :key="e.endpoint"><span class="chip" :class="'chip-' + e.outcome" x-text="e.endpoint + ' · ' + e.outcome"></span></template>
                     </div>
                   </template>
+                  </div>
                 </div>
               </template>
-              <template x-if="csfSelected.kind !== 'subcategory' && csfSelected.kind !== 'control'">
+              <template x-if="csfSelected.kind !== 'subcategory' && csfSelected.kind !== 'control' && csfSelected.kind !== 'technique'">
                 <div class="csf-rollup"><template x-for="row in rollup(csfSelected)" :key="row.status"><span class="status" :class="'status-' + row.status"><span class="status-icon" x-text="row.icon"></span><span x-text="row.count + ' ' + row.label"></span></span></template></div>
               </template>
             </div>
@@ -165,6 +189,24 @@
                 <td class="wrap" x-text="row.statement"></td>
                 <td x-text="row.controls.length"></td>
                 <td x-text="row.policies.map(p => p.id).join(', ') || '—'"></td>
+                <td><span class="status" :class="'status-' + row.status"><span class="status-icon" x-text="statusIcon(row.status)"></span><span x-text="statusLabel(row.status)"></span></span></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <div class="table-wrap" x-show="csfView === 'table' && fw === 'attack'">
+        <table>
+          <thead><tr><th>Tactic</th><th>Technique</th><th>Name</th><th>Sub-techniques</th><th>800-53 controls</th><th>TLS policies</th><th>Status</th></tr></thead>
+          <tbody>
+            <template x-for="row in attackRows()" :key="row.nodeId">
+              <tr>
+                <td x-text="row.tacticName"></td>
+                <td x-text="row.id"></td>
+                <td class="wrap" x-text="row.name"></td>
+                <td x-text="row.subtechniques.length"></td>
+                <td x-text="row.controls.length"></td>
+                <td x-text="evidencePolicies(row).map(p => p.id + ' via ' + p.control).join(', ') || '—'"></td>
                 <td><span class="status" :class="'status-' + row.status"><span class="status-icon" x-text="statusIcon(row.status)"></span><span x-text="statusLabel(row.status)"></span></span></td>
               </tr>
             </template>
@@ -262,7 +304,11 @@
         error: '',
         csf: null,
         sp: null,
-        fw: location.hash.startsWith('#sp800-53') ? 'sp800-53' : 'csf',  // deep-linkable: #csf, #csf/PR, #sp800-53, #sp800-53/SC, #sp800-53/SC-8
+        fw: location.hash.startsWith('#sp800-53') ? 'sp800-53' : location.hash.startsWith('#attack') ? 'attack' : 'csf',  // deep-linkable: #csf/PR, #sp800-53/SC-8, #attack/TA0006/T1557
+        attack: null,
+        attackZoom: null,
+        attackZoomer: null,
+        TABS: [{ id: 'csf', label: 'NIST CSF 2.0' }, { id: 'sp800-53', label: 'NIST SP 800-53' }, { id: 'attack', label: 'MITRE ATT&CK' }],
         csfZoomable: location.hash.startsWith('#csf/'),  // a CSF deep link implies the zoomable wheel
         csfZoom: null,
         csfZoomer: null,
@@ -274,6 +320,7 @@
           // Sequential on purpose: the dashboard pod is small, and the gateway times out slow concurrent requests.
           await this.loadFramework('csf', '/api/csf');
           await this.loadFramework('sp', '/api/sp800-53');
+          await this.loadFramework('attack', '/api/attack');
         },
         async loadFramework(key, url) {
           try {
@@ -281,6 +328,7 @@
             if (!r.ok) throw new Error(await r.text());
             this[key] = await r.json();
             if (key === 'sp') this.$nextTick(() => this.mountZoomable());
+            if (key === 'attack') this.$nextTick(() => this.mountAttackZoomable());
             if (key === 'csf' && this.csfZoomable) this.$nextTick(() => this.mountCsfZoomable());
           } catch (e) {
             this.error = 'Unable to load ' + url + ': ' + e.message;
@@ -303,10 +351,28 @@
           }
         },
         zoomOut() {
-          const z = this.fw === 'csf' ? this.csfZoomer : this.zoomable;
+          const z = this.fw === 'csf' ? this.csfZoomer : this.fw === 'sp800-53' ? this.zoomable : this.attackZoomer;
           if (z) z.zoomTo(z.root);
         },
-        zoomed() { return this.fw === 'csf' ? !!this.csfZoom : !!this.spZoom; },
+        zoomed() { return this.fw === 'csf' ? !!this.csfZoom : this.fw === 'sp800-53' ? !!this.spZoom : !!this.attackZoom; },
+        mountAttackZoomable() {
+          const { data, options } = attackZoomHierarchy(this.attack);
+          this.attackZoomer = renderZoomableSunburst(this.$refs.attackZoomable, data, options, {
+            onHover: id => { if (!this.csfPinned) this.csfSelected = findAttackNode(this.attack, id); },
+            onLeave: () => { if (!this.csfPinned) this.csfSelected = null; },
+            onPin: id => { this.csfPinned = !(this.csfPinned && this.csfSelected && this.csfSelected.nodeId === id); this.csfSelected = findAttackNode(this.attack, id); },
+            onZoom: id => { this.attackZoom = id; this.csfPinned = false; history.replaceState(null, '', '#attack' + (id ? '/' + id : '')); },
+          });
+          const target = location.hash.startsWith('#attack/') ? decodeURIComponent(location.hash.slice('#attack/'.length)) : '';
+          if (target) {
+            const node = this.attackZoomer.root.descendants().find(d => d.data.id === target && d.children);
+            if (node) this.attackZoomer.zoomTo(node, true);
+          }
+        },
+        attackRows() {
+          if (!this.attack) return [];
+          return this.attack.tactics.flatMap(t => t.techniques.map(x => ({ ...x, nodeId: t.id + '/' + x.id, tacticName: t.name })));
+        },
         toggleCsfZoom() {
           this.csfZoomable = !this.csfZoomable;
           this.csfSelected = null; this.csfPinned = false; this.csfZoom = null;
@@ -327,10 +393,17 @@
             if (node) this.csfZoomer.zoomTo(node, true);
           }
         },
-        current() { return this.fw === 'csf' ? this.csf : this.sp; },
+        current() { return this.fw === 'csf' ? this.csf : this.fw === 'sp800-53' ? this.sp : this.attack; },
+        tabStep(delta) {
+          const index = this.TABS.findIndex(t => t.id === this.fw);
+          const next = this.TABS[(index + delta + this.TABS.length) % this.TABS.length].id;
+          this.switchFw(next);
+          this.$nextTick(() => document.getElementById('tab-' + next)?.focus());
+        },
         switchFw(fw) {
           this.fw = fw; this.csfSelected = null; this.csfPinned = false;
-          history.replaceState(null, '', '#' + fw + (fw === 'csf' && this.csfZoom ? '/' + this.csfZoom : (fw === 'sp800-53' && this.spZoom ? '/' + this.spZoom : '')));
+          const zoom = fw === 'csf' ? this.csfZoom : fw === 'sp800-53' ? this.spZoom : this.attackZoom;
+          history.replaceState(null, '', '#' + fw + (zoom ? '/' + zoom : ''));
         },
         svg() {
           if (!this.csf) return '';
@@ -353,7 +426,8 @@
           this.csfSelected = this.fw === 'csf' ? findCsfNode(data, el.dataset.id) : findSp80053Node(data, el.dataset.id);
         },
         evidencePolicies(node) {
-          if (node.kind === 'control' || node.enhancements) return [...node.policies, ...node.enhancements.flatMap(e => e.policies)];
+          if (node.enhancements) return [...node.policies, ...node.enhancements.flatMap(e => e.policies)];
+          if (node.subtechniques) return [...node.policies, ...node.subtechniques.flatMap(s => s.policies)];
           return node.policies || [];
         },
         csfRows() {
@@ -369,6 +443,7 @@
           if (node.kind === 'function') return rollupRows(node.categories.flatMap(c => c.subcategories));
           if (node.kind === 'category') return rollupRows(node.subcategories);
           if (node.kind === 'family') return rollupRows(node.controls);
+          if (node.kind === 'tactic') return rollupRows(node.techniques);
           return [];
         },
         statusIcon(status) { return STATUS[status] ? STATUS[status].icon : '·'; },

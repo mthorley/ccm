@@ -11,7 +11,21 @@ const STATUS = {
   unmapped: { label: 'No TLS policy mapped', icon: '·', color: 'var(--status-none)' },
 };
 
-const SIZE = 640;
+/* Shared layout so the static and zoomable wheels line up exactly. Rings are not uniform: a thin inner ring, a
+   wide outer ring for the dense labels. `edges` are the ring boundaries from the centre hole outwards (each ring's
+   outer edge is the next boundary minus a 2px gap); the status ring sits just outside the last ring. */
+const LAYOUT = {
+  size: 640,
+  gap: 2,
+  statusRing: [304, 314],
+  edges: { 2: [72, 142, 302], 3: [72, 132, 202, 302] },
+};
+function ringsFor(levels) {
+  const edges = LAYOUT.edges[levels];
+  return { rings: edges.slice(0, -1).map((inner, k) => [inner, edges[k + 1] - LAYOUT.gap]), statusRing: LAYOUT.statusRing };
+}
+
+const SIZE = LAYOUT.size;
 const CENTER = SIZE / 2;
 const TAU = Math.PI * 2;
 const START = -Math.PI / 2; // 12 o'clock, clockwise like csf.tools
@@ -107,7 +121,7 @@ function csfHierarchy(csf) {
         })),
       })),
     },
-    options: { rings: [[72, 130], [134, 200], [204, 300]], statusRing: [304, 314], statusDepth: 2, centerLines: [`CSF ${csf.version}`, `${covered}/${csf.summary.subcategories} evidenced`] },
+    options: { ...ringsFor(3), statusDepth: 2, centerLines: [`CSF ${csf.version}`, `${covered}/${csf.summary.subcategories} evidenced`] },
   };
 }
 
@@ -120,7 +134,7 @@ function csfZoomHierarchy(csf) {
     data: {
       id: 'csf', title: `NIST CSF ${csf.version}`, kind: 'root',
       children: csf.functions.map(fn => ({
-        id: fn.id, title: fn.title, kind: 'function', fill: fnColor(fn.id), labelClass: 'fn', alwaysLabel: true,
+        id: fn.id, title: fn.title, kind: 'function', fill: fnColor(fn.id), labelClass: 'fn', labelMode: 'upright', alwaysLabel: true,
         children: fn.categories.map(cat => ({
           id: cat.id, title: cat.title, kind: 'category', fill: `color-mix(in oklab, ${fnColor(fn.id)} 68%, var(--panel))`, labelClass: 'cat', alwaysLabel: true,
           children: cat.subcategories.map(sub => ({
@@ -138,18 +152,20 @@ function csfZoomHierarchy(csf) {
 }
 
 function sp80053ZoomHierarchy(data) {
-  const covered = data.summary.pass + data.summary.warn + data.summary.fail;
   return {
     data: {
       id: 'sp800-53', title: `SP 800-53 r${data.version}`, kind: 'root',
       children: data.families.map((family, i) => ({
-        id: family.id, title: family.title, kind: 'family', labelClass: 'fn', alwaysLabel: true,
+        id: family.id, title: family.title, kind: 'family', labelClass: 'fn', labelMode: 'upright', alwaysLabel: true,
         fill: i % 2 ? 'var(--ring-neutral-a)' : 'var(--ring-neutral-b)',
         children: family.controls.map(control => ({
-          id: control.id, title: control.title, kind: 'control', status: control.status, evidenced: control.evidenced, labelClass: 'cat', alwaysLabel: control.evidenced,
+          id: control.id, title: control.title, kind: 'control', labelClass: 'cat',
+          status: control.evidenced ? control.status : undefined,  // only direct evidence paints the status ring
+          evidenced: control.evidenced, alwaysLabel: control.evidenced,  // derived relations are many; label them only once zoomed in
           fill: control.evidenced ? 'var(--accent)' : (i % 2 ? 'var(--ring-neutral-a-dim)' : 'var(--ring-neutral-b-dim)'),
           children: control.enhancements.length ? control.enhancements.map(e => ({
-            id: e.id, title: e.title, kind: 'enhancement', status: e.status, evidenced: e.policies.length > 0, labelClass: 'cat', alwaysLabel: e.policies.length > 0,
+            id: e.id, title: e.title, kind: 'enhancement', labelClass: 'cat', status: e.policies.length ? e.status : undefined,
+            evidenced: e.policies.length > 0, alwaysLabel: e.policies.length > 0,
             fill: e.policies.length ? 'var(--accent)' : (i % 2 ? 'var(--ring-neutral-a-dim)' : 'var(--ring-neutral-b-dim)'),
             value: 1 / control.enhancements.length,
           })) : undefined,
@@ -159,9 +175,51 @@ function sp80053ZoomHierarchy(data) {
     },
     options: {
       levels: 2, ariaLabel: `NIST SP 800-53 r${data.version} zoomable sunburst`,
-      centre: (node, depth) => node ? [node.id, depth === 1 ? node.title : 'click centre to go up'] : [`SP 800-53 r${data.version}`, `${covered}/${data.summary.controls} controls evidenced`],
+      centre: (node, depth) => node ? [node.id, depth === 1 ? node.title : 'click centre to go up'] : [`SP 800-53 r${data.version}`, `${data.summary.pass + data.summary.warn + data.summary.fail}/${data.summary.controls} controls evidenced`],
     },
   };
+}
+
+function attackZoomHierarchy(data) {
+  const covered = data.summary.pass + data.summary.warn + data.summary.fail;
+  const neutral = (i, dim) => (i % 2 ? 'var(--ring-neutral-a' : 'var(--ring-neutral-b') + (dim ? '-dim)' : ')');
+  return {
+    data: {
+      id: 'attack', title: `MITRE ATT&CK v${data.version}`, kind: 'root',
+      children: data.tactics.map((tactic, i) => ({
+        id: tactic.id, label: tactic.name, title: tactic.name, kind: 'tactic', labelClass: 'fn', alwaysLabel: true, fill: neutral(i),
+        children: tactic.techniques.map(t => ({
+          // a technique can sit under several tactics, so the node id is scoped to the placement
+          id: `${tactic.id}/${t.id}`, label: t.id, title: t.name, kind: 'technique', status: t.status, evidenced: t.evidenced,
+          labelClass: 'cat', alwaysLabel: t.evidenced, fill: t.evidenced ? 'var(--accent)' : neutral(i, true),
+          children: t.subtechniques.length ? t.subtechniques.map(st => ({
+            id: `${tactic.id}/${st.id}`, label: st.id, title: st.name, kind: 'technique', status: st.status, evidenced: st.evidenced,
+            labelClass: 'cat', alwaysLabel: st.evidenced, fill: st.evidenced ? 'var(--accent)' : neutral(i, true), value: 1 / t.subtechniques.length,
+          })) : undefined,
+          value: t.subtechniques.length ? undefined : 1,
+        })),
+      })),
+    },
+    options: {
+      levels: 2, ariaLabel: `MITRE ATT&CK Enterprise v${data.version} zoomable sunburst`,
+      centre: (node, depth) => node ? [node.label ?? node.id, depth === 1 ? 'tactic' : node.title] : [`ATT&CK v${data.version}`, `${covered}/${data.summary.techniques} techniques mitigated`],
+    },
+  };
+}
+
+function findAttackNode(data, nodeId) {
+  const [tacticId, techniqueId] = nodeId.split('/');
+  for (const tactic of data.tactics) {
+    if (tactic.id !== tacticId) continue;
+    if (!techniqueId) return { ...tactic, kind: 'tactic', path: 'ATT&CK tactic', title: '', text: '' };
+    for (const t of tactic.techniques) {
+      if (t.id === techniqueId) return { ...t, kind: 'technique', nodeId, path: `${tactic.name} › technique`, title: t.name, text: t.description };
+      for (const st of t.subtechniques) {
+        if (st.id === techniqueId) return { ...st, subtechniques: [], kind: 'technique', nodeId, path: `${tactic.name} › ${t.id} › sub-technique`, title: st.name, text: st.description };
+      }
+    }
+  }
+  return null;
 }
 
 function titleCaseText(text) {

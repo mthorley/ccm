@@ -24,7 +24,9 @@ Graph model — every framework version is an isolated subgraph under its own ro
 
     (:CsfSubcategory|:CsfCategory)-[:REFERENCES {source}]->(:Control|:ControlFamily)  # NIST OLIR informative references
     (:Control)-[:MITIGATES {source, mappingType}]->(:Technique)                        # CTID mappings-explorer
-    (:Policy {id})-[:SUPPORTS {rationale, source}]->(:Control)                         # CCM mapping of TLS policies
+    (:Policy {id})-[:SUPPORTS {rationale, source}]->(:CsfSubcategory)                  # CCM mapping of TLS policies
+    (:Policy {id})-[:SUPPORTS {rationale, source}]->(:Control)                         # CCM: controls a TLS policy itself evidences
+    (:Policy {id})-[:MITIGATES {rationale, source}]->(:Technique)                      # CCM: techniques a TLS policy genuinely mitigates
 
 Every catalog node carries `id` (the human identifier, e.g. "SC-8"), `framework`, `version`, and
 `key` = "<framework>:<version>/<id>". Uniqueness is on `key`, so ingesting a new NIST revision
@@ -37,7 +39,10 @@ import os
 from dataclasses import asdict
 from typing import Any
 
-from .catalog import AttackCatalog, AttackMapping, AttackObject, Catalog, CsfLinkage, Framework, PolicyMapping, Sp800_53Catalog
+from .catalog import (
+    AttackCatalog, AttackMapping, AttackObject, Catalog, CsfLinkage, Framework, PolicyControlMapping, PolicyMapping,
+    PolicyTechniqueMapping, Sp800_53Catalog,
+)
 
 VERSIONED_LABELS = [
     "CsfFunction", "CsfCategory", "CsfSubcategory", "CsfExample",
@@ -288,6 +293,30 @@ DELETE references
 
 MAPPINGS_QUERY = """
 UNWIND $rows AS row
+MATCH (subcategory:CsfSubcategory {key: row.subcategory_key})
+MERGE (policy:Policy {id: row.policy_id})
+SET policy.name = CASE WHEN row.policy_name = '' THEN policy.name ELSE row.policy_name END
+MERGE (policy)-[supports:SUPPORTS]->(subcategory)
+SET supports.rationale = row.rationale, supports.source = $source, supports.updatedAt = datetime()
+"""
+
+POLICY_MITIGATES_QUERY = """
+UNWIND $rows AS row
+MATCH (technique:Technique {key: row.technique_key})
+MERGE (policy:Policy {id: row.policy_id})
+SET policy.name = CASE WHEN row.policy_name = '' THEN policy.name ELSE row.policy_name END
+MERGE (policy)-[mitigates:MITIGATES]->(technique)
+SET mitigates.rationale = row.rationale, mitigates.source = $source, mitigates.updatedAt = datetime()
+"""
+
+STALE_POLICY_MITIGATES_QUERY = """
+MATCH (policy:Policy)-[mitigates:MITIGATES {source: $source}]->(technique:Technique)
+WHERE NOT [policy.id, technique.key] IN $pairs
+DELETE mitigates
+"""
+
+CONTROL_MAPPINGS_QUERY = """
+UNWIND $rows AS row
 MATCH (control:Control {key: row.control_key})
 MERGE (policy:Policy {id: row.policy_id})
 SET policy.name = CASE WHEN row.policy_name = '' THEN policy.name ELSE row.policy_name END
@@ -296,9 +325,16 @@ SET supports.rationale = row.rationale, supports.source = $source, supports.upda
 """
 
 # Drops SUPPORTS edges from a previous run of the same mapping file that are no longer listed —
-# including edges into a previous framework version once the mapping is re-pinned.
+# including edges into a previous framework version once the mapping is re-pinned. One prune per target
+# label, because the CSF and SP 800-53 sections of one file share a `source`.
 STALE_MAPPINGS_QUERY = """
-MATCH (policy:Policy)-[supports:SUPPORTS {source: $source}]->(target)
+MATCH (policy:Policy)-[supports:SUPPORTS {source: $source}]->(target:CsfSubcategory)
+WHERE NOT [policy.id, target.key] IN $pairs
+DELETE supports
+"""
+
+STALE_CONTROL_MAPPINGS_QUERY = """
+MATCH (policy:Policy)-[supports:SUPPORTS {source: $source}]->(target:Control)
 WHERE NOT [policy.id, target.key] IN $pairs
 DELETE supports
 """
@@ -422,6 +458,22 @@ def attack_mapping_statements(mappings: list[AttackMapping], sp800_53: Framework
     ]
 
 
+def control_mapping_statements(mappings: list[PolicyControlMapping], sp800_53: Framework, source: str) -> list[Statement]:
+    rows = [{**asdict(item), "control_key": key_for(sp800_53, item.control_id)} for item in mappings]
+    return [
+        (CONTROL_MAPPINGS_QUERY, {"rows": rows, "source": source}),
+        (STALE_CONTROL_MAPPINGS_QUERY, {"pairs": [[row["policy_id"], row["control_key"]] for row in rows], "source": source}),
+    ]
+
+
+def policy_technique_statements(mappings: list[PolicyTechniqueMapping], attack: Framework, source: str) -> list[Statement]:
+    rows = [{**asdict(item), "technique_key": key_for(attack, item.technique_id)} for item in mappings]
+    return [
+        (POLICY_MITIGATES_QUERY, {"rows": rows, "source": source}),
+        (STALE_POLICY_MITIGATES_QUERY, {"pairs": [[row["policy_id"], row["technique_key"]] for row in rows], "source": source}),
+    ]
+
+
 def linkage_statements(linkage: list[CsfLinkage], csf: Framework, sp800_53: Framework, source: str) -> list[Statement]:
     rows = [
         {"csf_kind": item.csf_kind, "csf_key": key_for(csf, item.csf_id), "target_kind": item.target_kind, "target_key": key_for(sp800_53, item.target_id)}
@@ -433,11 +485,11 @@ def linkage_statements(linkage: list[CsfLinkage], csf: Framework, sp800_53: Fram
     ]
 
 
-def mapping_statements(mappings: list[PolicyMapping], sp800_53: Framework, source: str) -> list[Statement]:
-    rows = [{**asdict(item), "control_key": key_for(sp800_53, item.control_id)} for item in mappings]
+def mapping_statements(mappings: list[PolicyMapping], csf: Framework, source: str) -> list[Statement]:
+    rows = [{**asdict(item), "subcategory_key": key_for(csf, item.subcategory_id)} for item in mappings]
     return [
         (MAPPINGS_QUERY, {"rows": rows, "source": source}),
-        (STALE_MAPPINGS_QUERY, {"pairs": [[row["policy_id"], row["control_key"]] for row in rows], "source": source}),
+        (STALE_MAPPINGS_QUERY, {"pairs": [[row["policy_id"], row["subcategory_key"]] for row in rows], "source": source}),
     ]
 
 

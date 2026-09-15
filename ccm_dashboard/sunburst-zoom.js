@@ -6,25 +6,33 @@
    rings, so every angle has exactly one status. Requires d3 v7. */
 
 function renderZoomableSunburst(container, data, options, callbacks) {
-  const size = 680, statusInset = 4, statusWidth = 8, margin = 6, duration = 750;
+  const { size, gap } = LAYOUT;  // shared with the static wheel so both line up exactly
+  const duration = 750;
   const levels = options.levels || 2;
-  const radius = (size / 2 - statusInset - statusWidth - margin) / (levels + 1);  // rings + centre hole + status ring fit the viewBox
+  // Partition depth y (0 = centre, levels+1 = outer edge) maps piecewise-linearly onto the layout's ring boundaries,
+  // so rings keep the static wheel's proportions and still tween smoothly while zooming.
+  const points = [0, ...LAYOUT.edges[levels]];
+  const radiusAt = y => {
+    const t = Math.max(0, Math.min(points.length - 1, y)), k = Math.min(Math.floor(t), points.length - 2);
+    return points[k] + (points[k + 1] - points[k]) * (t - k);
+  };
+  const radius = points[1];  // centre hole
   const status = STATUS;
 
   const root = d3.hierarchy(data).sum(d => d.value || 0).sort(() => 0);  // keep catalog order
   d3.partition().size([2 * Math.PI, root.height + 1])(root);
   root.each(d => { d.current = d; });
 
+  // Gaps come from the same 2px panel-coloured stroke the static wheel uses (no padAngle), so spacing is identical.
   const arc = d3.arc()
     .startAngle(d => d.x0).endAngle(d => d.x1)
-    .padAngle(d => Math.min((d.x1 - d.x0) / 2, 2 / radius)).padRadius(radius * 1.5)  // ~2px surface gap
-    .innerRadius(d => d.y0 * radius).outerRadius(d => Math.max(d.y0 * radius, d.y1 * radius - 1));
+    .innerRadius(d => radiusAt(d.y0)).outerRadius(d => Math.max(radiusAt(d.y0), radiusAt(d.y1) - gap));
   // The status ring hugs the deepest ring that has content at the current zoom (fewer rings remain below a deep node).
   let ringLevels = Math.min(levels, root.height);
   const statusArc = d3.arc()
     .startAngle(d => d.x0).endAngle(d => d.x1)
-    .padAngle(d => Math.min((d.x1 - d.x0) / 2, 1 / radius)).padRadius(radius * 1.5)
-    .innerRadius(() => (ringLevels + 1) * radius + statusInset).outerRadius(() => (ringLevels + 1) * radius + statusInset + statusWidth);
+    .innerRadius(() => radiusAt(ringLevels + 1) + (LAYOUT.statusRing[0] - points[points.length - 1]))
+    .outerRadius(() => radiusAt(ringLevels + 1) + (LAYOUT.statusRing[1] - points[points.length - 1]));
 
   // Visibility predicates take the node (for data/children) and a coordinate set (current or target),
   // because after a zoom the coordinates are plain {x0,x1,y0,y1} objects, not hierarchy nodes.
@@ -32,10 +40,18 @@ function renderZoomableSunburst(container, data, options, callbacks) {
   let outerLevel = ringLevels;  // ring index whose nodes carry the status ring (updated per zoom)
   const statusVisible = (d, c) => c.x1 > c.x0 && !!d.data.status && c.y0 >= 1 && c.y1 <= levels + 1 && (c.y0 === outerLevel || !d.children);
   const labelVisible = (d, c) => arcVisible(d, c) && (d.data.alwaysLabel ? (c.x1 - c.x0) > 0.012 : (c.y1 - c.y0) * (c.x1 - c.x0) > 0.04);
-  const labelTransform = c => {
-    const x = ((c.x0 + c.x1) / 2) * 180 / Math.PI, y = ((c.y0 + c.y1) / 2) * radius;
+  // Same placement as the static wheel: upright labels sit at the arc's centre; radial labels start 6px inside the
+  // ring's inner edge and read outward, flipped on the left half so they never read upside down.
+  const labelTransform = (d, c) => {
+    const mid = (c.x0 + c.x1) / 2;
+    if (d.data.labelMode === 'upright') {
+      const y = (radiusAt(c.y0) + radiusAt(c.y1)) / 2;
+      return `translate(${(y * Math.sin(mid)).toFixed(2)},${(-y * Math.cos(mid)).toFixed(2)})`;
+    }
+    const x = mid * 180 / Math.PI, y = radiusAt(c.y0) + 6;
     return `rotate(${x - 90}) translate(${y},0) rotate(${x < 180 ? 0 : 180})`;
   };
+  const labelAnchor = (d, c) => d.data.labelMode === 'upright' ? 'middle' : (((c.x0 + c.x1) / 2) * 180 / Math.PI < 180 ? 'start' : 'end');
   const labelClass = d => `arc-label ${d.data.labelClass || ''}${d.data.evidenced ? ' emphasis' : ''}`;
   const statusOpacity = d => d.data.status === 'unmapped' ? 0.5 : 1;
 
@@ -45,13 +61,13 @@ function renderZoomableSunburst(container, data, options, callbacks) {
 
   const path = svg.append('g').selectAll('path').data(root.descendants().slice(1)).join('path')
     .attr('fill', d => d.data.fill).attr('data-id', d => d.data.id).attr('tabindex', 0).attr('role', 'button')
-    .attr('aria-label', d => `${d.data.id}: ${d.data.title}`)
+    .attr('aria-label', d => `${d.data.label ?? d.data.id}: ${d.data.title}`)
     .attr('class', d => d.data.evidenced ? 'emphasis' : null)
     .attr('fill-opacity', d => arcVisible(d, d.current) ? 1 : 0)
     .attr('visibility', d => arcVisible(d, d.current) ? 'visible' : 'hidden')
     .attr('pointer-events', d => arcVisible(d, d.current) ? 'auto' : 'none')
     .attr('d', d => arc(d.current));
-  path.append('title').text(d => `${d.data.id} — ${d.data.title}`);
+  path.append('title').text(d => `${d.data.label ?? d.data.id} — ${d.data.title}`);
 
   const statusPath = svg.append('g').attr('class', 'status-ring').selectAll('path').data(root.descendants().slice(1)).join('path')
     .attr('class', 'status-arc')
@@ -60,13 +76,13 @@ function renderZoomableSunburst(container, data, options, callbacks) {
     .attr('visibility', d => statusVisible(d, d.current) ? 'visible' : 'hidden')
     .attr('d', d => statusArc(d.current));
 
-  const label = svg.append('g').attr('pointer-events', 'none').attr('text-anchor', 'middle').selectAll('text')
+  const label = svg.append('g').attr('pointer-events', 'none').selectAll('text')
     .data(root.descendants().slice(1)).join('text')
-    .attr('class', labelClass).attr('dy', '0.35em')
+    .attr('class', labelClass).attr('dy', '0.35em').attr('text-anchor', d => labelAnchor(d, d.current))
     .attr('fill-opacity', d => +labelVisible(d, d.current))
     .attr('visibility', d => labelVisible(d, d.current) ? 'visible' : 'hidden')
-    .attr('transform', d => labelTransform(d.current))
-    .text(d => d.data.id);
+    .attr('transform', d => labelTransform(d, d.current))
+    .text(d => d.data.label ?? d.data.id);
 
   const centre = svg.append('g').attr('class', 'centre');
   const parent = centre.append('circle').datum(root).attr('r', radius).attr('fill', 'none').attr('pointer-events', 'all')
@@ -105,7 +121,7 @@ function renderZoomableSunburst(container, data, options, callbacks) {
       statusPath.attr('fill-opacity', d => statusVisible(d, d.current) ? statusOpacity(d) : 0)
           .attr('visibility', d => statusVisible(d, d.current) ? 'visible' : 'hidden').attr('d', d => statusArc(d.current));
       label.attr('fill-opacity', d => +labelVisible(d, d.current)).attr('visibility', d => labelVisible(d, d.current) ? 'visible' : 'hidden')
-          .attr('transform', d => labelTransform(d.current));
+          .attr('text-anchor', d => labelAnchor(d, d.current)).attr('transform', d => labelTransform(d, d.current));
       return;
     }
     const t = svg.transition().duration(duration)
@@ -127,7 +143,8 @@ function renderZoomableSunburst(container, data, options, callbacks) {
     label.filter(function (d) { return +this.getAttribute('fill-opacity') || labelVisible(d, d.target); }).transition(t)
       .on('start', reveal(labelVisible)).on('end', settle(labelVisible))
       .attr('fill-opacity', d => +labelVisible(d, d.target))
-      .attrTween('transform', d => () => labelTransform(d.current));
+      .attr('text-anchor', d => labelAnchor(d, d.target))
+      .attrTween('transform', d => () => labelTransform(d, d.current));
   }
 
   return { zoomTo, root };
